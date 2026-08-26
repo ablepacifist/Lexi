@@ -1,0 +1,35 @@
+# Lexi config. Copy to config.toml and edit for the aragon device.
+# Secrets do NOT live here — the gateway shared secret comes from
+# $OBRENNA_AGENT_TOKEN or ./.agent_token (see [agent token] note at bottom).
+
+[brain]
+# Reach Obrenna's gateway on alison. LAN first, tunnel as fallback.
+lan_base_url = "http://alison.lan:9080"          # set to alison's LAN IP:9080
+tunnel_base_url = "https://llm.alex-dyakin.com"
+# Small/fast voice model (catalog slug). Text chat keeps its bigger model.
+orchestrator = "qwen3.5-4b-claude-opus-reasoning-distilled-v2"
+workers_enabled = false
+request_timeout_s = 120.0
+connect_timeout_s = 3.0
+
+[identity]
+# Lexicon owns identity. Lexi resolves the speaking user to an account_id the
+# brain scopes memory by. localhost because Lexicon runs on aragon too.
+lexicon_base_url = "http://localhost:36568"
+default_account_id = "local-default"   # used when no Lexicon session is present
+
+[engines]
+stt_model = "base"          # faster-whisper size (tiny|base|small) or a path
+stt_device = "cpu"
+stt_compute_type = "int8"
+# stt_language = "en"       # omit to autodetect
+tts_voice = "en_US-lessac-medium"
+wake_enabled = true
+wake_model = "hey_jarvis"   # openWakeWord model (swap for a custom "Hey Obrenna")
+wake_threshold = 0.5
+vad_aggressiveness = 2      # 0..3
+sample_rate = 16000
+models_dir = "./models"
+
+# agent_token_env = "OBRENNA_AGENT_TOKEN"
+# agent_token_file = "./.agent_token"

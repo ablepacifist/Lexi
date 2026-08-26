@@ -1,0 +1,12 @@
+# Lexi runtime deps. All local inference — no cloud SDKs.
+# Pin exact versions on the aragon device for reproducible offline installs.
+
+httpx>=0.27          # brain client + Lexicon identity (homelab calls only)
+
+# ── engine deps (install on the aragon device that has the mic) ──────────────
+# faster-whisper>=1.0        # STT (CTranslate2; CPU int8)
+# piper-tts>=1.2             # TTS
+# openwakeword>=0.6          # wake word
+# webrtcvad>=2.0.10          # voice activity detection
+# sounddevice>=0.4           # mic capture + playback (needs PortAudio)
+# numpy>=1.26

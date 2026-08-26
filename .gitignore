@@ -1,0 +1,20 @@
+# Secrets & local config
+.agent_token
+config.toml
+.env
+
+# Model files (fetched once at install, never committed)
+models/
+*.onnx
+*.bin
+*.gguf
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
