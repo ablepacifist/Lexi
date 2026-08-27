@@ -61,12 +61,12 @@ def test_streams_tokens_and_returns_final_text(monkeypatch):
     assert seen["body"]["orchestrator"] == cfg.orchestrator
 
 
-def test_lan_failure_falls_over_to_tunnel(monkeypatch):
+def test_tunnel_failure_falls_over_to_lan(monkeypatch):
     hits = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         hits.append(request.url.host)
-        if request.url.host == "lan":
+        if request.url.host == "tunnel":
             raise httpx.ConnectError("refused", request=request)
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=SSE)
 
@@ -76,7 +76,7 @@ def test_lan_failure_falls_over_to_tunnel(monkeypatch):
     client = ObrennaClient(cfg, agent_token="s" * 40)
     result = client.stream_turn("hi", account_id="userA")
 
-    assert hits == ["lan", "tunnel"]  # tried LAN first, then tunnel
+    assert hits == ["tunnel", "lan"]  # tried tunnel first, then LAN
     assert result.text == "Hello world"
 
 

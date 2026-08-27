@@ -99,7 +99,18 @@ class VoicePipeline:
 
     def listen_loop(self) -> None:  # pragma: no cover - hardware
         """Wake-word gated loop: wait for the wake word, then handle one turn."""
-        raise NotImplementedError(
-            "listen_loop: wire the wake-word frame loop on the aragon device "
-            "(feed mic frames to engines.wake.detect, then run_voice_turn)."
-        )
+        if not self._engines:
+            raise RuntimeError("No engines configured; cannot listen.")
+        import sounddevice as sd  # noqa: PLC0415
+
+        sr = self._cfg.engines.sample_rate
+        wake = self._engines.wake
+        frame_len = int(sr * 0.08)  # 80 ms, openWakeWord's expected frame size
+        with sd.RawInputStream(
+            samplerate=sr, channels=1, dtype="int16", blocksize=frame_len
+        ) as stream:
+            logger.info("Listening for wake word...")
+            while True:
+                data, _ = stream.read(frame_len)
+                if wake is None or wake.detect(bytes(data)):
+                    self.run_voice_turn(speak=True)

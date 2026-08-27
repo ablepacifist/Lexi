@@ -62,7 +62,7 @@ class ObrennaClient:
         sentence-chunked TTS) and ``on_event(dict)`` for every agent event
         (phase/thinking/tool/…). Returns the final chat_id + full text.
 
-        Fails over LAN → tunnel on a connection error *before* the response
+        Fails over tunnel → LAN on a connection error *before* the response
         starts; once bytes are flowing we are committed to that base.
         """
         payload = {

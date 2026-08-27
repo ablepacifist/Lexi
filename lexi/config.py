@@ -20,8 +20,8 @@ from pathlib import Path
 @dataclass
 class BrainConfig:
     """How to reach Obrenna's brain on alison, through its gateway."""
-    # Tried in order: LAN first, then the public tunnel (decision: LAN primary,
-    # tunnel fallback).
+    # Tried in order: tunnel first (works off-site, no LAN dependency), then
+    # LAN as fallback (decision: tunnel primary, LAN fallback).
     lan_base_url: str = "http://alison.lan:9080"
     tunnel_base_url: str = "https://llm.alex-dyakin.com"
     # Per-request orchestrator slug — a small/fast model for voice. Sent as
@@ -33,7 +33,7 @@ class BrainConfig:
 
     @property
     def bases(self) -> list[str]:
-        return [b for b in (self.lan_base_url, self.tunnel_base_url) if b]
+        return [b for b in (self.tunnel_base_url, self.lan_base_url) if b]
 
 
 @dataclass
