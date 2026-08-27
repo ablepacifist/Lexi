@@ -73,16 +73,42 @@ def _require_sounddevice():
         ) from exc
 
 
-def record_until_silence(sample_rate: int, vad, max_seconds: float = 15.0):
-    """Capture mono PCM from the mic until the VAD reports end-of-speech.
+def record_until_silence(
+    sample_rate: int,
+    vad,
+    max_seconds: float = 15.0,
+    frame_ms: int = 30,
+    trailing_silence_ms: int = 800,
+) -> bytes:
+    """Capture mono PCM from the mic until the VAD reports trailing silence.
 
-    Returns int16 PCM bytes. Real implementation lives on the aragon device;
-    kept thin here so the pipeline wiring is testable without hardware.
+    webrtcvad needs 10/20/30 ms mono int16 frames — frame_ms must be one of
+    those. Returns int16 PCM bytes (empty if nothing was ever detected as
+    speech within max_seconds).
     """
     sd, np = _require_sounddevice()  # pragma: no cover - hardware dependent
-    raise NotImplementedError(
-        "record_until_silence: wire VAD frame loop on the aragon device."
-    )
+    frame_len = int(sample_rate * frame_ms / 1000)  # samples per frame
+    silence_frames_needed = trailing_silence_ms // frame_ms
+    collected: list[bytes] = []
+    started = False
+    silence = 0
+    with sd.RawInputStream(
+        samplerate=sample_rate, channels=1, dtype="int16", blocksize=frame_len
+    ) as stream:
+        max_frames = int(max_seconds * 1000 / frame_ms)
+        for _ in range(max_frames):
+            data, _ = stream.read(frame_len)
+            frame = bytes(data)
+            speech = vad.is_speech(frame, sample_rate)
+            if speech:
+                started, silence = True, 0
+                collected.append(frame)
+            elif started:
+                silence += 1
+                collected.append(frame)
+                if silence >= silence_frames_needed:
+                    break
+    return b"".join(collected)
 
 
 def play_pcm(pcm: bytes, sample_rate: int) -> None:

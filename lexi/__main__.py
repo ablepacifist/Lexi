@@ -59,6 +59,12 @@ def _one(pipeline: VoicePipeline, text: str, speak: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles default to a legacy codepage (e.g. cp1252) that can't
+    # print most of what an LLM reply might contain (emoji, smart quotes, …).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     ap = argparse.ArgumentParser(prog="lexi")
     ap.add_argument("--say", help="one-shot: speak/print the answer to this text")
     ap.add_argument("--voice", action="store_true", help="full mic loop (needs audio)")
