@@ -19,7 +19,18 @@ lexicon_base_url = "http://localhost:36568"
 default_account_id = "local-default"   # used when no Lexicon session is present
 
 [engines]
-stt_model = "base"          # faster-whisper size (tiny|base|small) or a path
+# Measured on aragon (Ryzen 7 PRO 4750U, CPU int8, warm model, 2.7 s clip).
+# Model load is ~1-4 s once at startup and is excluded:
+#
+#   tiny.en   0.40 s   RTF 0.15x
+#   base.en   1.00 s   RTF 0.37x   <- default: same accuracy as base, 27% faster
+#   base      1.37 s   RTF 0.50x
+#   small.en  2.43 s   RTF 0.89x
+#
+# The `.en` variants are English-only builds of the same weights — strictly
+# better here than the multilingual ones. Drop to tiny.en if latency matters
+# more than accuracy; go up to small.en once STT moves to alison's GPU.
+stt_model = "base.en"       # faster-whisper size (tiny.en|base.en|small.en) or a path
 stt_device = "cpu"
 stt_compute_type = "int8"
 # stt_language = "en"       # omit to autodetect
