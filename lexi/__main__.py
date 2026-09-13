@@ -15,13 +15,19 @@ import logging
 import os
 import sys
 
-from .config import load_config
+from .config import LexiConfig, load_config
 from .identity import IdentityResolver
 from .obrenna_client import BrainAuthError, BrainUnreachable, ObrennaClient
 from .pipeline import VoicePipeline
 
 
-def _build(speak: bool) -> VoicePipeline:
+def _build(speak: bool, *, need_engines: bool | None = None) -> tuple[VoicePipeline, LexiConfig]:
+    """Build the pipeline and hand back the config that produced it.
+
+    ``need_engines`` defaults to ``speak``: engines (and their heavy deps) are
+    only constructed when something will actually use them. Voice mode needs
+    them even with --no-speak, because the mic and STT live there too.
+    """
     cfg = load_config()
     token = cfg.agent_token()
     if not token:
@@ -36,10 +42,10 @@ def _build(speak: bool) -> VoicePipeline:
     identity = IdentityResolver(cfg.identity, session_cookie=session_cookie)
 
     engines = None
-    if speak:
+    if need_engines if need_engines is not None else speak:
         from .engines.registry import build_engines
         engines = build_engines(cfg.engines)
-    return VoicePipeline(cfg, client, identity, engines=engines)
+    return VoicePipeline(cfg, client, identity, engines=engines), cfg
 
 
 def _one(pipeline: VoicePipeline, text: str, speak: bool) -> None:
@@ -73,14 +79,24 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     speak = not args.no_speak
-    # Engines (and their heavy deps) are only built when we actually speak.
-    pipeline = _build(speak=speak)
+    # Voice mode needs the mic and STT even when it is not speaking back.
+    pipeline, cfg = _build(speak=speak, need_engines=speak or args.voice)
 
     if args.voice:  # pragma: no cover - hardware
-        print("Voice mode. Ctrl-C to quit.")
+        # Wake-gated when a wake word is configured, which is the normal case:
+        # listen_loop waits for the wake word and only then records a turn.
+        # Without this, --voice recorded and transcribed continuously — the
+        # wake word was built but nothing ever called it.
+        if cfg.engines.wake_enabled:
+            print(f"Voice mode. Say the wake word ({cfg.engines.wake_model}). Ctrl-C to quit.")
+        else:
+            print("Voice mode, wake word DISABLED — recording every turn. Ctrl-C to quit.")
         try:
-            while True:
-                pipeline.run_voice_turn(speak=True)
+            if cfg.engines.wake_enabled:
+                pipeline.listen_loop()
+            else:
+                while True:
+                    pipeline.run_voice_turn(speak=speak)
         except KeyboardInterrupt:
             return 0
 
