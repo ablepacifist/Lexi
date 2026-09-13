@@ -46,6 +46,9 @@ class PiperTts:
 
     def synthesize(self, text: str) -> Iterator[bytes]:  # pragma: no cover - model dependent
         self._ensure()
-        # Piper yields audio chunks; expose raw int16 PCM bytes to the caller.
-        for chunk in self._voice.synthesize_stream_raw(text):
-            yield chunk
+        # Piper yields one AudioChunk per sentence; expose raw int16 PCM bytes.
+        # This is the >=1.3 API. Older piper-tts had ``synthesize_stream_raw``,
+        # which yielded bytes directly — hence the pin in pyproject.toml, since
+        # the two are silently incompatible at runtime.
+        for chunk in self._voice.synthesize(text):
+            yield chunk.audio_int16_bytes
