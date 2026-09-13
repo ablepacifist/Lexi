@@ -1,12 +1,18 @@
 # Lexi runtime deps. All local inference — no cloud SDKs.
-# Pin exact versions on the aragon device for reproducible offline installs.
+# Versions are pinned to what is verified working on aragon (Python 3.11, Windows).
 
-httpx>=0.27          # brain client + Lexicon identity (homelab calls only)
+httpx==0.28.1          # brain client + Lexicon identity (homelab calls only)
 
 # ── engine deps (install on the aragon device that has the mic) ──────────────
-# faster-whisper>=1.0        # STT (CTranslate2; CPU int8)
-# piper-tts>=1.2             # TTS
-# openwakeword>=0.6          # wake word
-# webrtcvad>=2.0.10          # voice activity detection
-# sounddevice>=0.4           # mic capture + playback (needs PortAudio)
-# numpy>=1.26
+faster-whisper==1.2.1      # STT (CTranslate2; CPU int8, or CUDA on alison)
+piper-tts==1.7.0           # TTS
+openwakeword==0.6.0        # wake word
+webrtcvad-wheels==2.0.14   # VAD. NOT `webrtcvad` — that has no Windows wheel and
+                           # needs a C compiler. This fork ships wheels and
+                           # provides the same `webrtcvad` module.
+sounddevice==0.5.6         # mic capture + playback (bundles PortAudio on Windows)
+numpy==2.4.6
+
+# ── HTTP face (lexi/server.py) — only needed where the browser endpoint runs ──
+fastapi==0.141.1
+uvicorn==0.52.4

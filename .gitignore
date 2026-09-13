@@ -1,5 +1,6 @@
 # Secrets & local config
 .agent_token
+.tool_token
 config.toml
 .env
 
@@ -8,6 +9,10 @@ models/
 *.onnx
 *.bin
 *.gguf
+
+# Runtime output (uvicorn access logs etc.)
+srv_out.txt
+*.log
 
 # Python
 __pycache__/

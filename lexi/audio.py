@@ -20,6 +20,62 @@ _BOUNDARY = re.compile(r"([.!?])(\s+)|(\n+)")
 _SOFT_FLUSH_CHARS = 180
 
 
+# Obrenna answers in markdown — it is the same brain the web UI talks to. Piper
+# has no idea markdown exists and pronounces the syntax: measured on aragon,
+# "**Tuesday at 7 PM**" takes 4.98 s to speak versus 2.11 s for the same words
+# clean, because it says the asterisks out loud. Everything on the way to TTS
+# gets stripped.
+#
+# Deliberately conservative — these only fire on *paired*, well-formed markup,
+# so arithmetic ("5 * 3"), a lone underscore in a filename, or an unmatched
+# asterisk pass through untouched rather than being silently mangled.
+
+
+def _emph(delim: str) -> str:
+    """Capture group for emphasis content delimited by ``delim``.
+
+    Two rules, both from real markdown, and both load-bearing here:
+    the content cannot contain the delimiter, so "**a** **b**" is two spans
+    rather than one greedy match; and it cannot start or end with whitespace,
+    so spaced-out arithmetic ("a * b * c") is not read as italics.
+    """
+    return rf"([^\s{delim}][^{delim}\n]*[^\s{delim}]|[^\s{delim}])"
+
+
+_STAR = _emph("*")
+_UNDER = _emph("_")
+_TILDE = _emph("~")
+
+_MD_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"```.*?```", re.DOTALL), " "),        # fenced code
+    (re.compile(r"`([^`\n]+)`"), r"\1"),               # inline code
+    (re.compile(r"!\[[^\]]*\]\([^)]*\)"), " "),        # images: drop entirely
+    (re.compile(r"\[([^\]]+)\]\([^)]*\)"), r"\1"),     # links: keep the text
+    # Emphasis, built from _emph() below.
+    (re.compile(r"\*\*\*" + _STAR + r"\*\*\*"), r"\1"),
+    (re.compile(r"\*\*" + _STAR + r"\*\*"), r"\1"),                   # bold
+    (re.compile(r"(?<![\w*])\*" + _STAR + r"\*(?![\w*])"), r"\1"),    # italic
+    (re.compile(r"(?<![\w_])__" + _UNDER + r"__(?![\w_])"), r"\1"),
+    (re.compile(r"(?<![\w_])_" + _UNDER + r"_(?![\w_])"), r"\1"),
+    (re.compile(r"~~" + _TILDE + r"~~"), r"\1"),                      # strikethrough
+    (re.compile(r"^\s{0,3}#{1,6}\s+", re.MULTILINE), ""),      # headings
+    (re.compile(r"^\s{0,3}>\s?", re.MULTILINE), ""),           # blockquote
+    (re.compile(r"^\s{0,3}([-*+]|\d+\.)\s+", re.MULTILINE), ""),  # list bullets
+    (re.compile(r"^\s{0,3}([-*_])\s*(?:\1\s*){2,}$", re.MULTILINE), " "),  # hr
+)
+
+
+def strip_markdown(text: str) -> str:
+    """Flatten markdown to plain prose for TTS.
+
+    Not a parser and not trying to be — it removes the syntax a speech engine
+    would otherwise read aloud, and leaves anything ambiguous alone.
+    """
+    for pattern, repl in _MD_PATTERNS:
+        text = pattern.sub(repl, text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
 class SentenceChunker:
     """Feed streamed token text; get back complete sentences to synthesize."""
 

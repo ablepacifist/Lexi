@@ -27,6 +27,16 @@ class BrainUnreachable(RuntimeError):
     """No configured base URL (LAN or tunnel) accepted the request."""
 
 
+# Gateway-level statuses that mean "the origin behind me is not there", as
+# opposed to "the origin answered and said no". Cloudflare returns 530 when the
+# tunnel has no connected origin, which is exactly what a powered-off alison
+# looks like from off-site. These are retried against the next base and, if none
+# answers, surface as BrainUnreachable — the signal the offline fallback waits
+# for. Without this an outage arrives as a raw HTTPStatusError traceback and the
+# fallback never fires.
+_ORIGIN_DOWN_STATUSES = frozenset({502, 503, 504, 520, 521, 522, 523, 524, 530})
+
+
 class BrainAuthError(RuntimeError):
     """The gateway rejected the shared secret (401/403)."""
 
@@ -81,6 +91,18 @@ class ObrennaClient:
                 return self._stream_one(url, payload, on_token, on_event)
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
                 logger.warning("Brain base %s unreachable (%s); trying next.", base, exc)
+                last_err = exc
+                continue
+            except httpx.HTTPStatusError as exc:
+                # A gateway that is up but has no origin behind it is still an
+                # outage; anything else (a real 4xx/5xx from Obrenna itself) is
+                # a genuine answer and must not be retried against another base.
+                if exc.response.status_code not in _ORIGIN_DOWN_STATUSES:
+                    raise
+                logger.warning(
+                    "Brain base %s returned %s (origin down); trying next.",
+                    base, exc.response.status_code,
+                )
                 last_err = exc
                 continue
         raise BrainUnreachable(
