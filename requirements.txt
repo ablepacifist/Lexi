@@ -12,3 +12,7 @@ webrtcvad-wheels==2.0.14   # VAD. NOT `webrtcvad` — that has no Windows wheel 
                            # provides the same `webrtcvad` module.
 sounddevice==0.5.6         # mic capture + playback (bundles PortAudio on Windows)
 numpy==2.4.6
+
+# ── HTTP face (lexi/server.py) — only needed where the browser endpoint runs ──
+fastapi==0.141.1
+uvicorn==0.52.4

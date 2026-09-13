@@ -48,3 +48,24 @@ class WhisperStt:
             vad_filter=False,  # Lexi does its own VAD upstream.
         )
         return "".join(seg.text for seg in segments).strip()
+
+    def transcribe_encoded(self, data: bytes) -> str:  # pragma: no cover - model dependent
+        """Transcribe a compressed clip (WebM/Opus, MP4/AAC, WAV, …).
+
+        Browsers hand back whatever their MediaRecorder produces — Opus in a
+        WebM container on Chrome and Firefox, AAC in MP4 on Safari — so the
+        container is not knowable in advance. faster-whisper already depends on
+        PyAV, which decodes and resamples all of them, so this needs no ffmpeg
+        binary on the host.
+        """
+        self._ensure()
+        import io  # noqa: PLC0415
+        from faster_whisper.audio import decode_audio  # noqa: PLC0415
+
+        audio = decode_audio(io.BytesIO(data), sampling_rate=self._cfg.sample_rate)
+        segments, _info = self._model.transcribe(
+            audio,
+            language=self._cfg.stt_language,
+            vad_filter=False,
+        )
+        return "".join(seg.text for seg in segments).strip()

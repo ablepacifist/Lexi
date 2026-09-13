@@ -24,6 +24,13 @@ engines = [
     "sounddevice==0.5.6",
     "numpy==2.4.6",
 ]
+# The HTTP face (lexi/server.py). Separate from `engines` so a mic-only device
+# does not pull a web framework it will never import. Pinned for the same
+# reason the engine deps are.
+server = [
+    "fastapi==0.141.1",
+    "uvicorn==0.52.4",
+]
 dev = ["pytest>=8"]
 
 [project.scripts]
