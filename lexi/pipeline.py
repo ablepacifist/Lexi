@@ -81,7 +81,13 @@ class VoicePipeline:
     def speak_sentence(self, sentence: str) -> None:  # pragma: no cover - hardware
         if not self._engines:
             raise RuntimeError("No engines configured; cannot speak.")
-        for pcm in self._engines.tts.synthesize(sentence):
+        # Strip markdown here rather than in the chunker: the raw text still
+        # reaches on_sentence/on_event callers (a UI may want the formatting),
+        # but nothing with syntax in it ever reaches the speech engine.
+        spoken = audio.strip_markdown(sentence)
+        if not spoken:
+            return
+        for pcm in self._engines.tts.synthesize(spoken):
             audio.play_pcm(pcm, self._engines.tts.sample_rate)
 
     # ── mic-driven (aragon device) ───────────────────────────────────────────
