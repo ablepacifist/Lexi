@@ -132,22 +132,31 @@ def _require_sounddevice():
 def record_until_silence(
     sample_rate: int,
     vad,
-    max_seconds: float = 15.0,
+    max_seconds: float = 10.0,
     frame_ms: int = 30,
     trailing_silence_ms: int = 800,
+    min_start_frames: int = 3,
 ) -> bytes:
     """Capture mono PCM from the mic until the VAD reports trailing silence.
 
     webrtcvad needs 10/20/30 ms mono int16 frames — frame_ms must be one of
-    those. Returns int16 PCM bytes (empty if nothing was ever detected as
-    speech within max_seconds).
+    those. Returns int16 PCM bytes (empty if no real speech was detected).
+
+    ``min_start_frames`` debounces the onset: that many CONSECUTIVE speech
+    frames are required before the utterance is considered begun, so a stray
+    click / key-clack / TV transient can't open (then, followed by quiet,
+    immediately close) a ~1 s "utterance" of near-silence — the failure we saw.
+    Pre-speech frames are discarded so the clip starts clean; ``max_seconds``
+    caps a runaway (e.g. a TV droning on and never going quiet).
     """
     sd, np = _require_sounddevice()  # pragma: no cover - hardware dependent
     frame_len = int(sample_rate * frame_ms / 1000)  # samples per frame
     silence_frames_needed = trailing_silence_ms // frame_ms
     collected: list[bytes] = []
+    ramp: list[bytes] = []  # candidate onset frames, kept only once we "start"
     started = False
     silence = 0
+    speech_run = 0
     with sd.RawInputStream(
         samplerate=sample_rate, channels=1, dtype="int16", blocksize=frame_len
     ) as stream:
@@ -156,15 +165,26 @@ def record_until_silence(
             data, _ = stream.read(frame_len)
             frame = bytes(data)
             speech = vad.is_speech(frame, sample_rate)
-            if speech:
-                started, silence = True, 0
+            if not started:
+                if speech:
+                    speech_run += 1
+                    ramp.append(frame)
+                    if speech_run >= min_start_frames:
+                        started = True
+                        collected.extend(ramp)  # keep the onset; don't clip word 1
+                        ramp = []
+                else:
+                    speech_run = 0
+                    ramp = []  # drop pre-speech noise
+            else:
                 collected.append(frame)
-            elif started:
-                silence += 1
-                collected.append(frame)
-                if silence >= silence_frames_needed:
-                    break
-    return b"".join(collected)
+                if speech:
+                    silence = 0
+                else:
+                    silence += 1
+                    if silence >= silence_frames_needed:
+                        break
+    return b"".join(collected) if started else b""
 
 
 def play_pcm(pcm: bytes, sample_rate: int) -> None:
