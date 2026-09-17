@@ -41,11 +41,17 @@ def _build(speak: bool, *, need_engines: bool | None = None) -> tuple[VoicePipel
     session_cookie = os.getenv("LEXICON_SESSION")  # optional per-device Lexicon session
     identity = IdentityResolver(cfg.identity, session_cookie=session_cookie)
 
+    from .media import MediaPlayer
+    media = MediaPlayer(cfg.identity, cfg.engines.mpv_audio_device)  # lazy login
+
+    from .history import ConversationLog
+    history = ConversationLog(cfg.history.path, cfg.history.ttl_days, cfg.history.enabled)
+
     engines = None
     if need_engines if need_engines is not None else speak:
         from .engines.registry import build_engines
         engines = build_engines(cfg.engines)
-    return VoicePipeline(cfg, client, identity, engines=engines), cfg
+    return VoicePipeline(cfg, client, identity, engines=engines, media=media, history=history), cfg
 
 
 def _one(pipeline: VoicePipeline, text: str, speak: bool) -> None:
@@ -62,6 +68,57 @@ def _one(pipeline: VoicePipeline, text: str, speak: bool) -> None:
         return
     if not speak:
         print(f"Lexi> {answer}")
+
+
+def _claim_single_instance() -> None:
+    """Ensure only one --voice instance holds the mic.
+
+    An orphaned --voice process (SSH session closed without it exiting) keeps the
+    single-capture USB mic busy, so the next run can't open the mic — or worse,
+    the stale one keeps answering with old code. On start we kill a stale instance
+    recorded in the pidfile, then record our own PID. Best-effort: a lock hiccup
+    must never stop the assistant from starting.
+    """
+    import atexit
+    import os
+    import signal
+    import time
+    from pathlib import Path
+
+    pidfile = Path(".voice.pid")  # cwd is the Lexi dir
+    try:
+        if pidfile.exists():
+            old = int(pidfile.read_text().strip() or "0")
+            if old and old != os.getpid():
+                alive = True
+                try:
+                    os.kill(old, 0)
+                except OSError:
+                    alive = False
+                cmd = ""
+                try:
+                    cmd = Path(f"/proc/{old}/cmdline").read_text(errors="replace")
+                except OSError:
+                    cmd = ""
+                if alive and "lexi" in cmd:
+                    print(f"Stopping stale voice instance (pid {old})...", file=sys.stderr)
+                    try:
+                        os.kill(old, signal.SIGTERM)
+                        for _ in range(20):
+                            time.sleep(0.1)
+                            try:
+                                os.kill(old, 0)
+                            except OSError:
+                                break
+                        else:
+                            os.kill(old, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    time.sleep(0.5)  # let ALSA release the mic
+        pidfile.write_text(str(os.getpid()))
+        atexit.register(lambda: pidfile.unlink(missing_ok=True))
+    except Exception:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -83,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     pipeline, cfg = _build(speak=speak, need_engines=speak or args.voice)
 
     if args.voice:  # pragma: no cover - hardware
+        _claim_single_instance()  # kill any orphaned --voice holding the mic
         # Wake-gated when a wake word is configured, which is the normal case:
         # listen_loop waits for the wake word and only then records a turn.
         # Without this, --voice recorded and transcribed continuously — the
