@@ -104,7 +104,14 @@ class VoicePipeline:
         return self.run_text_turn(transcript, speak=speak)
 
     def listen_loop(self) -> None:  # pragma: no cover - hardware
-        """Wake-word gated loop: wait for the wake word, then handle one turn."""
+        """Wake-word gated loop: wait for the wake word, then handle one turn.
+
+        The wake-listen stream is opened and CLOSED around each detection so that
+        ``run_voice_turn`` can open the mic itself. A single-capture USB mic (the
+        M3) cannot be opened twice at once — doing so is PortAudio error -9985
+        ("Device unavailable"). After the turn we reset the wake model so audio
+        left in its buffer can't immediately re-trigger it.
+        """
         if not self._engines:
             raise RuntimeError("No engines configured; cannot listen.")
         import sounddevice as sd  # noqa: PLC0415
@@ -112,11 +119,21 @@ class VoicePipeline:
         sr = self._cfg.engines.sample_rate
         wake = self._engines.wake
         frame_len = int(sr * 0.08)  # 80 ms, openWakeWord's expected frame size
-        with sd.RawInputStream(
-            samplerate=sr, channels=1, dtype="int16", blocksize=frame_len
-        ) as stream:
-            logger.info("Listening for wake word...")
-            while True:
-                data, _ = stream.read(frame_len)
-                if wake is None or wake.detect(bytes(data)):
-                    self.run_voice_turn(speak=True)
+        logger.info("Listening for wake word...")
+        while True:
+            detected = False
+            with sd.RawInputStream(
+                samplerate=sr, channels=1, dtype="int16", blocksize=frame_len
+            ) as stream:
+                while True:
+                    data, _ = stream.read(frame_len)
+                    if wake is None or wake.detect(bytes(data)):
+                        detected = True
+                        break
+            # Stream closed here → the mic is free for run_voice_turn's capture.
+            if detected:
+                logger.info("Wake word detected.")
+                self.run_voice_turn(speak=True)
+                if wake is not None:
+                    wake.reset()
+                logger.info("Listening for wake word...")

@@ -45,7 +45,11 @@ class WhisperStt:
         segments, _info = self._model.transcribe(
             audio,
             language=self._cfg.stt_language,
-            vad_filter=False,  # Lexi does its own VAD upstream.
+            # Trim internal silence: even after our VAD endpointing, a clip can
+            # carry trailing/leading quiet that Whisper "fills" with hallucinated
+            # filler ("Hi there…", "I will let you know"). vad_filter drops it.
+            vad_filter=True,
+            condition_on_previous_text=False,
         )
         return "".join(seg.text for seg in segments).strip()
 
@@ -66,6 +70,7 @@ class WhisperStt:
         segments, _info = self._model.transcribe(
             audio,
             language=self._cfg.stt_language,
-            vad_filter=False,
+            vad_filter=True,
+            condition_on_previous_text=False,
         )
         return "".join(seg.text for seg in segments).strip()

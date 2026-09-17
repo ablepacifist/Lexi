@@ -44,6 +44,23 @@ pip install -e ".[engines]"
 python scripts/fetch_models.py   # one-time; afterwards Lexi runs offline
 ```
 
+### Python 3.13 (e.g. Raspberry Pi OS / Debian 13) — wake word note
+
+openWakeWord's `tflite-runtime` dependency has **no Python 3.13 wheel**, so
+`.[engines]` fails on 3.13. Install the rest, then add openWakeWord without its
+tflite dep and run it on **onnxruntime** (already pulled by faster-whisper/piper):
+
+```bash
+pip install faster-whisper==1.2.1 piper-tts==1.7.0 webrtcvad-wheels==2.0.14 \
+            sounddevice==0.5.6 numpy==2.4.6
+pip install --no-deps openwakeword==0.6.0
+pip install requests tqdm scipy scikit-learn      # openWakeWord's real runtime deps
+python scripts/fetch_models.py
+```
+
+`engines/wake.py` loads the model with `inference_framework="onnx"`, so no
+tflite-runtime is needed at runtime.
+
 ## Configure
 
 ```bash

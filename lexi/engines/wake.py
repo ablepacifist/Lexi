@@ -27,8 +27,12 @@ class OpenWakeWord:
                 "openwakeword is not installed. Install Lexi's engine deps on "
                 "the aragon device (see requirements.txt)."
             ) from exc
-        logger.info("Loading wake word model=%s", self._cfg.wake_model)
-        self._model = Model(wakeword_models=[self._cfg.wake_model])
+        logger.info("Loading wake word model=%s (onnx)", self._cfg.wake_model)
+        # inference_framework="onnx": tflite-runtime has no Python 3.13 wheel, so
+        # we run the ONNX models on onnxruntime (already a faster-whisper/piper dep).
+        self._model = Model(
+            wakeword_models=[self._cfg.wake_model], inference_framework="onnx"
+        )
 
     def detect(self, frame: bytes) -> bool:  # pragma: no cover - model dependent
         self._ensure()
@@ -36,3 +40,12 @@ class OpenWakeWord:
         samples = np.frombuffer(frame, dtype=np.int16)
         scores = self._model.predict(samples)
         return any(score >= self._cfg.wake_threshold for score in scores.values())
+
+    def reset(self) -> None:  # pragma: no cover - model dependent
+        """Clear the streaming prediction buffer between turns so residual audio
+        (the tail of a spoken command) can't immediately re-fire the wake word."""
+        if self._model is not None:
+            try:
+                self._model.reset()
+            except Exception:
+                pass
