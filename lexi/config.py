@@ -65,10 +65,15 @@ class EngineConfig:
     vad_aggressiveness: int = 2      # webrtcvad 0..3
     sample_rate: int = 16000
     models_dir: str = "./models"
-    # mpv --audio-device for music playback. Empty = let mpv choose (which on a
-    # Pi wrongly defaults to HDMI); set e.g. "alsa/plughw:CARD=Headphones" to
-    # force the 3.5mm jack. TTS uses the ALSA default separately (sounddevice).
+    # mpv --audio-device for music playback. Empty = let mpv choose. On the Pi,
+    # route through PipeWire ("pipewire") so music and TTS mix; a raw ALSA device
+    # like "alsa/plughw:CARD=Headphones" is single-open and cannot mix with TTS.
     mpv_audio_device: str = ""
+    # True only when the OS mixes mpv + TTS on the same output (e.g. PipeWire on
+    # the Pi). Then Lexi PAUSES music on wake and speaks over it, resuming after.
+    # False (safe default) = music is STOPPED before a spoken chat reply, because
+    # a paused mpv would otherwise hold an exclusive device and mute TTS.
+    audio_shared: bool = False
 
 
 @dataclass

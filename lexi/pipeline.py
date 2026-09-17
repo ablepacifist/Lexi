@@ -109,21 +109,26 @@ class VoicePipeline:
     def run_voice_turn(self, *, speak: bool = True) -> str:  # pragma: no cover - hardware
         if not self._engines:
             raise RuntimeError("No engines configured; cannot capture/transcribe.")
-        # The wake word just fired. Stop any music first: the 3.5mm jack is a
-        # single-open device (freeing it lets us speak the reply) and it unmasks
-        # the mic so the command is captured cleanly. (Duck-and-resume is a
-        # future refinement.)
+        # The wake word just fired. PAUSE any music (don't kill it): a paused
+        # track leaves the room quiet so STT is clean, and lets us skip/resume it
+        # afterwards instead of losing the queue. resume_after tracks whether we
+        # owe it a resume once the turn is done.
+        resume_after = False
         if self._media is not None and self._media.is_playing:
-            self._media.stop()
+            self._media.pause()
+            resume_after = True
         self.session.set_state(State.LISTENING)
         pcm = audio.record_until_silence(self._cfg.engines.sample_rate, self._engines.vad)
         transcript = self._engines.stt.transcribe(pcm, self._cfg.engines.sample_rate)
         logger.info("Transcript: %s", transcript)
         if not transcript.strip():
+            if resume_after and self._media is not None:
+                self._media.resume()
             self.session.set_state(State.IDLE)
             return ""
-        # Media commands ("play …", "stop") are handled locally — no brain, so
-        # music works even when alison is offline.
+        # Media commands ("play …", "stop", "skip", "live stream") are handled
+        # locally — no brain — so music works even when alison is offline. A media
+        # command manages playback itself, so we never resume the old track after it.
         if self._media is not None and self._media.enabled:
             intent = match_media_intent(transcript)
             if intent is not None:
@@ -135,35 +140,77 @@ class VoicePipeline:
                     "result": label,
                 })
                 return label
+        # A chat turn needs to speak the reply. On an exclusive audio device a
+        # paused mpv would mute TTS, so unless the OS mixes them we must stop the
+        # music (and can't resume it); with shared audio we speak over it + resume.
+        if resume_after and not self._cfg.engines.audio_shared and self._media is not None:
+            self._media.stop()
+            resume_after = False
         reply = self.run_text_turn(transcript, speak=speak)
         self._log(transcript, "chat", {"reply": reply})
+        if resume_after and self._media is not None:
+            self._media.resume()
         return reply
 
     def _handle_media_intent(self, intent: dict, *, speak: bool) -> str:  # pragma: no cover - hardware
-        """Play/stop music (single track or playlist, optionally shuffled) from
-        Lexicon on the Pi. The 3.5mm output is single-open, so we speak the
-        confirmation BEFORE starting mpv."""
+        """Play / stop / skip music (single track, playlist, or the communal live
+        stream) from Lexicon on the Pi. Music was paused on wake; every branch here
+        either resumes it (skip), halts it, or starts fresh — never leaves it paused."""
         assert self._media is not None
-        self._media.stop()
         action = intent.get("action")
         logger.info("media intent=%s query=%r shuffle=%s",
                     action, intent.get("query"), intent.get("shuffle"))
 
         def say(msg: str) -> None:
+            # Fail-safe: on an exclusive audio device a paused mpv can block TTS
+            # (e.g. the "Skipping." confirmation). A spoken-confirmation hiccup
+            # must never break the actual media command, so swallow it.
             if speak and msg:
-                self.speak_sentence(msg)
+                try:
+                    self.speak_sentence(msg)
+                except Exception as exc:  # noqa: BLE001 - TTS/device best-effort
+                    logger.debug("media confirmation TTS skipped: %s", exc)
 
         def done(ret: str = "") -> str:
             self.session.set_state(State.IDLE)
             return ret
 
+        # "skip"/"next" must NOT stop playback — it advances within it. During the
+        # communal live stream, skipping is a vote; otherwise it's a local queue skip.
+        if action == "next":
+            if self._media.livestream_active:
+                try:
+                    self._media.livestream_skip()
+                    say("Voting to skip.")
+                except MediaError as exc:
+                    logger.warning("livestream skip failed: %s", exc)
+                    say("Sorry, I couldn't skip.")
+                # The stream was paused on wake; keep it playing so the next
+                # communal track (loaded by the SSE follower) is audible.
+                self._media.resume()
+            elif self._media.is_playing:
+                self._media.next()
+                say("Skipping.")
+            else:
+                say("Nothing is playing.")
+            return done()
+
+        # Every remaining action starts fresh or halts, so release the paused track.
+        self._media.stop()
+
         if action == "stop":
             say("Okay, stopped.")
             return done()
 
-        if action == "next":
-            say("I can't skip tracks yet.")
-            return done()
+        if action == "livestream":
+            say("Joining the live stream.")
+            try:
+                self._media.play_livestream()
+            except MediaError as exc:
+                logger.warning("livestream join failed: %s", exc)
+                say("Sorry, the live stream isn't playing anything right now.")
+                return done()
+            return done("live stream")
 
         if action == "play_playlist":
             try:

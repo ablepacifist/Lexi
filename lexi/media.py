@@ -5,21 +5,37 @@ media library, and plays the track's stream through **mpv**. It works whether or
 not alison's brain is online — "play music" is a device command Lexi handles
 itself, straight to Lexicon (LAN or the api.alex-dyakin.com tunnel).
 
-Audio note: the Pi's 3.5mm output is a single-open ALSA device, so the caller
-speaks any TTS confirmation BEFORE starting playback, and stops playback before
-speaking again. mpv runs as a detached process; ``stop`` kills it.
+Audio note: mpv runs as a detached process and is driven live through its JSON
+IPC socket (``--input-ipc-server``) — so we can pause / resume / skip without
+killing it. ``stop`` kills the process. Whether TTS can speak *while* mpv is
+paused depends on the OS audio setup: on the Pi both are routed through PipeWire
+so they mix; on a single-open ALSA device the caller must stop before speaking.
+
+Live stream: Lexicon also serves a synchronized communal stream
+(``/api/livestream/*``) — everyone hears the same track at the same position.
+``play_livestream`` joins it (seeking to the live offset) and follows the SSE
+update feed so the Pi switches tracks when the communal stream advances.
 """
 from __future__ import annotations
 
+import json
 import logging
 import shutil
+import socket
 import subprocess
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
 
 import httpx
 
 from .config import IdentityConfig
 
 logger = logging.getLogger(__name__)
+
+# mpv JSON IPC socket, created in the Lexi working directory when playback starts.
+_IPC_SOCKET = ".mpv-ipc.sock"
 
 
 class MediaError(RuntimeError):
@@ -34,6 +50,14 @@ class MediaPlayer:
         self._cookie: str | None = None   # JSESSIONID value
         self._user_id: int | None = None
         self._proc: subprocess.Popen | None = None
+        self._ipc_path = str(Path(_IPC_SOCKET).resolve())
+        self._paused = False
+        # Live stream: a background thread follows the communal stream's SSE feed
+        # and re-points mpv when the shared track changes.
+        self._livestream_active = False
+        self._ls_current_media: int | None = None
+        self._ls_stop = threading.Event()
+        self._ls_thread: threading.Thread | None = None
 
     @property
     def enabled(self) -> bool:
@@ -101,25 +125,46 @@ class MediaPlayer:
                     return it
         return items[0] if items else None
 
-    # ── playback (detached mpv) ──────────────────────────────────────────────
-    def play(self, media_id: int) -> None:
+    # ── playback (detached mpv, driven over its IPC socket) ──────────────────
+    def _url(self, media_id: int) -> str:
+        return f"{self._base}/api/media/stream/{media_id}"
+
+    def _spawn(self, urls: list[str], *, shuffle: bool = False,
+               start: float | None = None) -> None:
+        """(Re)launch mpv with an IPC socket for the given URL queue."""
         self._ensure_login()
         if not shutil.which("mpv"):
             raise MediaError("mpv is not installed on this device.")
+        if not urls:
+            raise MediaError("nothing to play")
         self.stop()
-        url = f"{self._base}/api/media/stream/{media_id}"
+        try:
+            Path(self._ipc_path).unlink()  # stale socket from a killed mpv
+        except OSError:
+            pass
         cmd = ["mpv", "--no-video", "--really-quiet",
+               f"--input-ipc-server={self._ipc_path}",
                f"--http-header-fields=Cookie: JSESSIONID={self._cookie}"]
         if self._audio_device:
-            cmd.append(f"--audio-device={self._audio_device}")  # force the 3.5mm jack
-        cmd.append(url)
+            cmd.append(f"--audio-device={self._audio_device}")  # force a sink (e.g. 3.5mm)
+        if shuffle:
+            cmd.append("--shuffle")
+        if start is not None:
+            cmd.append(f"--start=+{max(0, int(start))}")  # seek into a live track
+        cmd += urls
         try:
             self._proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
         except OSError as exc:
             raise MediaError(f"Could not start mpv: {exc}") from exc
+        self._paused = False
+
+    def play(self, media_id: int) -> None:
+        # A one-item playlist so "next" degrades gracefully (no-op) instead of erroring.
+        self._spawn([self._url(media_id)])
         logger.info("mpv playing media_id=%s", media_id)
 
     def stop(self) -> None:
+        self._stop_livestream_follower()
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()
             try:
@@ -127,10 +172,63 @@ class MediaPlayer:
             except subprocess.TimeoutExpired:
                 self._proc.kill()
         self._proc = None
+        self._paused = False
 
     @property
     def is_playing(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused and self.is_playing
+
+    @property
+    def livestream_active(self) -> bool:
+        return self._livestream_active and self.is_playing
+
+    # ── live control over mpv's JSON IPC socket (pause / resume / skip) ──────
+    def _ipc(self, command: list) -> None:
+        """Send one JSON command to the running mpv. Best-effort: a control
+        hiccup must never crash a voice turn, so failures are logged, not raised."""
+        if not self.is_playing:
+            return
+        payload = json.dumps({"command": command}).encode() + b"\n"
+        last: Exception | None = None
+        for _ in range(10):  # mpv creates the socket a beat after launch
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(1.0)
+                try:
+                    s.connect(self._ipc_path)
+                    s.sendall(payload)
+                    try:
+                        s.recv(4096)  # drain the reply so mpv isn't left blocking
+                    except OSError:
+                        pass
+                finally:
+                    s.close()
+                return
+            except OSError as exc:
+                last = exc
+                time.sleep(0.1)
+        logger.debug("mpv IPC command %s failed: %s", command, last)
+
+    def pause(self) -> None:
+        if self.is_playing and not self._paused:
+            self._ipc(["set_property", "pause", True])
+            self._paused = True
+
+    def resume(self) -> None:
+        if self.is_playing and self._paused:
+            self._ipc(["set_property", "pause", False])
+            self._paused = False
+
+    def next(self) -> None:
+        """Advance to the next queued track (and keep playing if we were paused)."""
+        if self.is_playing:
+            self._ipc(["playlist-next", "force"])
+            if self._paused:
+                self.resume()
 
     # ── library helpers: fuzzy track match, playlists, all-music ─────────────
     def _authed_json(self, path: str, params: dict | None = None):
@@ -214,25 +312,104 @@ class MediaPlayer:
 
     def play_many(self, media_ids: list[int], shuffle: bool = False) -> None:
         """Play a list of tracks as an mpv queue (mpv auto-advances; --shuffle
-        randomizes)."""
-        self._ensure_login()
-        if not shutil.which("mpv"):
-            raise MediaError("mpv is not installed on this device.")
+        randomizes; "next" skips within it via IPC)."""
         if not media_ids:
             raise MediaError("nothing to play")
-        self.stop()
-        cmd = ["mpv", "--no-video", "--really-quiet",
-               f"--http-header-fields=Cookie: JSESSIONID={self._cookie}"]
-        if self._audio_device:
-            cmd.append(f"--audio-device={self._audio_device}")
-        if shuffle:
-            cmd.append("--shuffle")
-        cmd += [f"{self._base}/api/media/stream/{mid}" for mid in media_ids]
-        try:
-            self._proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
-        except OSError as exc:
-            raise MediaError(f"Could not start mpv: {exc}") from exc
+        self._spawn([self._url(m) for m in media_ids], shuffle=shuffle)
         logger.info("mpv playing %d tracks (shuffle=%s)", len(media_ids), shuffle)
+
+    # ── live stream (synchronized communal stream) ───────────────────────────
+    def livestream_state(self) -> dict:
+        data = self._authed_json("/api/livestream/state") or {}
+        return data.get("state") or {}
+
+    def play_livestream(self) -> None:
+        """Join Lexicon's communal stream at its live position and follow it."""
+        st = self.livestream_state()
+        mid = st.get("currentMediaId")
+        if not mid:
+            raise MediaError("The live stream has nothing playing right now.")
+        self._spawn([self._url(int(mid))], start=self._livestream_offset(st))
+        self._ls_current_media = int(mid)
+        self._livestream_active = True
+        self._start_livestream_follower()
+        logger.info("joined live stream at media_id=%s", mid)
+
+    def livestream_skip(self) -> None:
+        """Cast a vote to skip the current communal track. The SSE feed then
+        tells us to switch when the stream actually advances."""
+        self._ensure_login()
+        try:
+            resp = httpx.post(
+                f"{self._base}/api/livestream/skip",
+                json={"userId": self._user_id},
+                headers=self._headers(), timeout=10.0,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise MediaError(f"Skip vote failed: {exc}") from exc
+
+    @staticmethod
+    def _livestream_offset(st: dict) -> float:
+        """Seconds into the current track the communal stream is right now:
+        its recorded position plus wall-clock elapsed since it started."""
+        pos = (st.get("currentPositionMs") or 0) / 1000.0
+        started = st.get("currentStartTime")
+        if not started:
+            return max(0.0, pos)
+        try:
+            t = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+        except ValueError:
+            return max(0.0, pos)
+        # aware timestamp → compare in its zone; naive → assume same locale as the
+        # Pi (both on-site), which is the common case for this homelab.
+        now = datetime.now(t.tzinfo) if t.tzinfo else datetime.now()
+        elapsed = (now - t).total_seconds()
+        if elapsed < 0 or elapsed > 6 * 3600:  # clock skew / unparseable → ignore
+            elapsed = 0.0
+        return max(0.0, pos + elapsed)
+
+    def _start_livestream_follower(self) -> None:
+        self._stop_livestream_follower()
+        self._ls_stop = threading.Event()
+        self._ls_thread = threading.Thread(
+            target=self._follow_livestream, name="lexi-livestream", daemon=True
+        )
+        self._ls_thread.start()
+
+    def _stop_livestream_follower(self) -> None:
+        self._livestream_active = False
+        self._ls_stop.set()
+        self._ls_thread = None
+        self._ls_current_media = None
+
+    def _follow_livestream(self) -> None:  # pragma: no cover - network thread
+        url = f"{self._base}/api/livestream/updates"
+        event: str | None = None
+        try:
+            with httpx.stream("GET", url, headers=self._headers(), timeout=None) as resp:
+                for line in resp.iter_lines():
+                    if self._ls_stop.is_set():
+                        return
+                    if line.startswith("event:"):
+                        event = line.split(":", 1)[1].strip()
+                    elif line.startswith("data:") and event in ("init", "state-update"):
+                        self._on_livestream_state(line.split(":", 1)[1].strip())
+        except Exception as exc:  # network drop, shutdown, etc.
+            logger.debug("live stream follower ended: %s", exc)
+
+    def _on_livestream_state(self, data: str) -> None:  # pragma: no cover - network thread
+        try:
+            payload = json.loads(data)
+        except ValueError:
+            return
+        st = payload.get("state") or payload.get("data") or payload
+        mid = st.get("currentMediaId") if isinstance(st, dict) else None
+        if not mid or int(mid) == self._ls_current_media:
+            return
+        self._ls_current_media = int(mid)
+        logger.info("live stream advanced to media_id=%s", mid)
+        self._ipc(["loadfile", self._url(int(mid)), "replace"])
 
 
 def _jsessionid_from_headers(resp: httpx.Response) -> str | None:

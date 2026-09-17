@@ -7,6 +7,7 @@ LLM. This is what lets music work even when alison's brain is offline.
 Returns one of:
   {"action": "stop"}
   {"action": "next"}
+  {"action": "livestream"}
   {"action": "play", "query": <track>}
   {"action": "play_playlist", "query": <name>|None, "shuffle": bool, "all": bool}
 """
@@ -22,7 +23,17 @@ _TRAIL = r"[.?!]*\s*$"
 _STOP = re.compile(
     _LEAD + r"(?:stop|pause)(?:\s+(?:the\s+)?(?:music|song|playback|audio|it))?" + _TRAIL, re.I
 )
-_NEXT = re.compile(_LEAD + r"(?:next|skip)(?:\s+(?:song|track))?" + _TRAIL, re.I)
+_NEXT = re.compile(
+    _LEAD + r"(?:next|skip)(?:\s+(?:this\s+|the\s+)?(?:song|track|one))?" + _TRAIL, re.I
+)
+
+# "play/join/tune in to [the] live stream / livestream / radio / station".
+# Must be tested BEFORE _PLAY, or "play the live stream" is read as a track title.
+_LIVESTREAM = re.compile(
+    _LEAD + r"(?:play|put on|start|join|tune in ?to)\s+(?:the\s+)?"
+    r"(?:live\s*stream|radio|station)" + _TRAIL,
+    re.I,
+)
 
 # "shuffle [the] [playlist] X"  |  "shuffle my music / everything / all"
 _SHUFFLE = re.compile(_LEAD + r"shuffle\s+(?:the\s+)?(?:playlist\s+)?(.+?)" + _TRAIL, re.I)
@@ -45,6 +56,8 @@ def match_media_intent(text: str) -> dict | None:
         return {"action": "stop"}
     if _NEXT.match(text):
         return {"action": "next"}
+    if _LIVESTREAM.match(text):
+        return {"action": "livestream"}
 
     m = _SHUFFLE.match(text)
     if m:
