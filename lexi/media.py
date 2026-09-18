@@ -250,6 +250,7 @@ class MediaPlayer:
         closest-titled MUSIC/AUDIOBOOK track in the user's library."""
         import difflib
 
+        self._ensure_login()  # resolve _user_id BEFORE it goes into the URL
         items = self._authed_json(f"/api/media/user/{self._user_id}") or []
         if not isinstance(items, list):
             return None
@@ -270,6 +271,7 @@ class MediaPlayer:
     def find_playlist(self, name: str) -> dict | None:
         import difflib
 
+        self._ensure_login()  # resolve _user_id BEFORE it goes into the query
         pls = self._authed_json("/api/playlists", {"userId": self._user_id}) or []
         if not isinstance(pls, list):
             return None
@@ -304,6 +306,7 @@ class MediaPlayer:
         return ids
 
     def all_music_ids(self) -> list[int]:
+        self._ensure_login()  # resolve _user_id BEFORE it goes into the URL
         items = self._authed_json(f"/api/media/user/{self._user_id}") or []
         if not isinstance(items, list):
             return []
