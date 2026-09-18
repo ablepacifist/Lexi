@@ -14,6 +14,12 @@ models/
 srv_out.txt
 *.log
 
+# Conversation transcript log (private; TTL-pruned)
+logs/
+
+# Single-instance lock for --voice
+*.pid
+
 # Python
 __pycache__/
 *.py[cod]

@@ -45,6 +45,11 @@ class IdentityConfig:
     # Fallback account_id when no Lexicon session is available (e.g. a shared
     # device). Real per-speaker identity (enrollment/diarization) is future work.
     default_account_id: str = "local-default"
+    # Lexicon credentials Lexi logs in with for the media library (music
+    # playback) and identity. Kept in config.toml (gitignored) or env, never
+    # committed. Leave blank to disable media playback.
+    lexicon_username: str = ""
+    lexicon_password: str = ""
 
 
 @dataclass
@@ -60,6 +65,24 @@ class EngineConfig:
     vad_aggressiveness: int = 2      # webrtcvad 0..3
     sample_rate: int = 16000
     models_dir: str = "./models"
+    # mpv --audio-device for music playback. Empty = let mpv choose. On the Pi,
+    # route through PipeWire ("pipewire") so music and TTS mix; a raw ALSA device
+    # like "alsa/plughw:CARD=Headphones" is single-open and cannot mix with TTS.
+    mpv_audio_device: str = ""
+    # True only when the OS mixes mpv + TTS on the same output (e.g. PipeWire on
+    # the Pi). Then Lexi PAUSES music on wake and speaks over it, resuming after.
+    # False (safe default) = music is STOPPED before a spoken chat reply, because
+    # a paused mpv would otherwise hold an exclusive device and mute TTS.
+    audio_shared: bool = False
+
+
+@dataclass
+class HistoryConfig:
+    """Local transcript log of every voice turn, pruned by age. Private to the
+    device (gitignored); a debug/transcript trail, not the brain's memory."""
+    enabled: bool = True
+    path: str = "./logs/turns.jsonl"
+    ttl_days: int = 14
 
 
 @dataclass
@@ -67,6 +90,7 @@ class LexiConfig:
     brain: BrainConfig = field(default_factory=BrainConfig)
     identity: IdentityConfig = field(default_factory=IdentityConfig)
     engines: EngineConfig = field(default_factory=EngineConfig)
+    history: HistoryConfig = field(default_factory=HistoryConfig)
     # Where the gateway shared-secret comes from (env wins over file).
     agent_token_env: str = "OBRENNA_AGENT_TOKEN"
     agent_token_file: str = "./.agent_token"
@@ -109,6 +133,7 @@ def load_config(path: str | os.PathLike | None = None) -> LexiConfig:
         brain=BrainConfig(**_section(data, "brain")),
         identity=IdentityConfig(**_section(data, "identity")),
         engines=EngineConfig(**_section(data, "engines")),
+        history=HistoryConfig(**_section(data, "history")),
     )
     top = {k: v for k, v in data.items() if k in ("agent_token_env", "agent_token_file")}
     for k, v in top.items():

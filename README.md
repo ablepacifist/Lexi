@@ -92,6 +92,41 @@ python -m lexi                   # text in, spoken out (needs engines)
 python -m lexi --voice           # full mic loop: wake → listen → answer → speak
 ```
 
+## Pi audio: mixing music + speech on one output (PipeWire)
+
+The Pi's 3.5mm jack is a single-open ALSA device: a raw `plughw` player (mpv)
+holds it exclusively, so TTS can't speak while music plays. Route **both** through
+PipeWire (already running on Raspberry Pi OS) so they mix — this is what lets Lexi
+pause music on wake, speak a reply, and resume, and gives audible skip
+confirmations. One-time setup on the Pi:
+
+```bash
+sudo apt install -y pipewire-alsa          # ALSA → PipeWire bridge (adds pcm.pipewire)
+wpctl status                                # confirm the default sink is the 3.5mm jack
+                                            # ("bcm2835 Headphones") and the source is your mic
+```
+
+Then make the ALSA **default playback** go through PipeWire while capture stays on
+the raw USB mic (`/etc/asound.conf`):
+
+```
+pcm.!default { type asym; playback.pcm "pipewire"; capture.pcm "plughw:CARD=M3,DEV=0" }
+ctl.!default { type hw; card M3 }
+```
+
+and set in `config.toml`:
+
+```toml
+[engines]
+mpv_audio_device = "pipewire"   # mpv's native PipeWire output (not raw ALSA)
+audio_shared = true             # pause + speak-over + resume; without this, music
+                                # is stopped before a spoken reply (safe fallback)
+```
+
+Audio is reached via the per-user PipeWire socket under `XDG_RUNTIME_DIR`;
+interactive/SSH sessions set it, and Lexi defaults it to `/run/user/<uid>` if a
+lean launcher (cron/systemd) leaves it unset.
+
 ## Brain side (alison) — already landed
 
 Obrenna reuses its existing streaming route; Lexi passes two optional fields:
