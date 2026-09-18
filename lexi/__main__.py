@@ -128,6 +128,14 @@ def main(argv: list[str] | None = None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
+    # Audio (PipeWire, used by both mpv and TTS on the Pi) is reached through the
+    # per-user socket under XDG_RUNTIME_DIR. Interactive shells set it, but a lean
+    # launcher (cron/systemd) may not — default it so audio never silently fails.
+    if os.name == "posix" and not os.environ.get("XDG_RUNTIME_DIR"):
+        candidate = f"/run/user/{os.getuid()}"
+        if os.path.isdir(candidate):
+            os.environ["XDG_RUNTIME_DIR"] = candidate
+
     ap = argparse.ArgumentParser(prog="lexi")
     ap.add_argument("--say", help="one-shot: speak/print the answer to this text")
     ap.add_argument("--voice", action="store_true", help="full mic loop (needs audio)")
