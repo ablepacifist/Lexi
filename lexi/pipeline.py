@@ -20,7 +20,7 @@ from .history import ConversationLog
 from .identity import IdentityResolver
 from .intents import match_media_intent
 from .media import MediaError, MediaPlayer
-from .obrenna_client import ObrennaClient
+from .obrenna_client import BrainAuthError, BrainUnreachable, ObrennaClient
 from .session import State, VoiceSession
 
 logger = logging.getLogger(__name__)
@@ -146,7 +146,22 @@ class VoicePipeline:
         if resume_after and not self._cfg.engines.audio_shared and self._media is not None:
             self._media.stop()
             resume_after = False
-        reply = self.run_text_turn(transcript, speak=speak)
+        # The brain (alison) is usually OFF. A chat turn that can't reach it must
+        # degrade gracefully — say so and keep listening — NOT crash the loop.
+        try:
+            reply = self.run_text_turn(transcript, speak=speak)
+        except (BrainUnreachable, BrainAuthError) as exc:
+            logger.warning("brain unavailable: %s", exc)
+            if speak:
+                try:
+                    self.speak_sentence("Sorry, the brain is offline right now.")
+                except Exception:  # noqa: BLE001 - TTS best-effort
+                    pass
+            self._log(transcript, "error", {"error": str(exc)})
+            if resume_after and self._media is not None:
+                self._media.resume()
+            self.session.set_state(State.IDLE)
+            return ""
         self._log(transcript, "chat", {"reply": reply})
         if resume_after and self._media is not None:
             self._media.resume()
@@ -185,9 +200,7 @@ class VoicePipeline:
                 except MediaError as exc:
                     logger.warning("livestream skip failed: %s", exc)
                     say("Sorry, I couldn't skip.")
-                # The stream was paused on wake; keep it playing so the next
-                # communal track (loaded by the SSE follower) is audible.
-                self._media.resume()
+                # The driver thread plays the next track (unpaused); no resume here.
             elif self._media.is_playing:
                 self._media.next()
                 say("Skipping.")
@@ -291,7 +304,13 @@ class VoicePipeline:
             # Stream closed here → the mic is free for run_voice_turn's capture.
             if detected:
                 logger.info("Wake word detected.")
-                self.run_voice_turn(speak=True)
+                # The always-on loop must outlive any single turn. run_voice_turn
+                # already handles a missing brain; this catches anything else
+                # (audio glitch, network blip) so Lexi keeps listening.
+                try:
+                    self.run_voice_turn(speak=True)
+                except Exception:  # noqa: BLE001 - keep the appliance alive
+                    logger.exception("voice turn failed; continuing to listen")
                 if wake is not None:
                     wake.reset()
                 logger.info("Listening for wake word...")

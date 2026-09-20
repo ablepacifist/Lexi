@@ -10,6 +10,16 @@ def test_stop_and_skip():
     assert match_media_intent("hey jarvis, skip this track")["action"] == "next"
 
 
+def test_filler_prefixes_still_match():
+    # Filler words must not push a command to the brain (which is usually off).
+    # "Just stop." previously fell through → brain call → crash when offline.
+    assert match_media_intent("just stop")["action"] == "stop"
+    assert match_media_intent("Just stop.")["action"] == "stop"
+    assert match_media_intent("okay skip")["action"] == "next"
+    assert match_media_intent("yeah next song")["action"] == "next"
+    assert match_media_intent("just play the live stream") == {"action": "livestream"}
+
+
 def test_live_stream_beats_play():
     # "play the live stream" must be the livestream action, NOT a track called
     # "the live stream" — the reason _LIVESTREAM is tested before _PLAY.

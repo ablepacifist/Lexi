@@ -16,8 +16,12 @@ from __future__ import annotations
 import re
 
 # Optional leading wake word ("hey jarvis ...") in case a bit of it lands in the
-# transcript, plus a polite prefix ("can you", "please").
-_LEAD = r"^\s*(?:hey\s+\w+[,.\s]+)?(?:can you\s+|could you\s+|please\s+)?"
+# transcript, plus common filler/polite prefixes ("just", "okay", "can you", …)
+# so "just stop" / "okay skip" still match instead of falling through to the brain.
+_LEAD = (
+    r"^\s*(?:hey\s+\w+[,.\s]+)?"
+    r"(?:(?:just|okay|ok|yeah|yes|please|can you|could you|would you|hey)\s+)*"
+)
 _TRAIL = r"[.?!]*\s*$"
 
 _STOP = re.compile(
