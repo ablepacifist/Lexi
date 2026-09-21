@@ -40,8 +40,13 @@ class BrainConfig:
 class IdentityConfig:
     """Per-Lexicon-user identity. Lexi resolves who is speaking to an account_id
     that the brain scopes memory by."""
-    # Lexicon base URL (localhost on aragon). Used to resolve the current user.
+    # Lexicon base URL. On aragon's own box this is localhost; on the Pi/other
+    # LAN devices, aragon's LAN IP (e.g. http://192.168.1.4:36568).
     lexicon_base_url: str = "http://localhost:36568"
+    # Fallback Lexicon URL tried when the primary is unreachable — the Cloudflare
+    # tunnel (https://api.alex-dyakin.com), so media still works off-LAN. Blank =
+    # no fallback. Mirrors the brain client's LAN-primary/tunnel-fallback pattern.
+    lexicon_fallback_url: str = ""
     # Fallback account_id when no Lexicon session is available (e.g. a shared
     # device). Real per-speaker identity (enrollment/diarization) is future work.
     default_account_id: str = "local-default"

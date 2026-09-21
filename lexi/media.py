@@ -44,7 +44,12 @@ class MediaError(RuntimeError):
 class MediaPlayer:
     def __init__(self, cfg: IdentityConfig, audio_device: str = ""):
         self._cfg = cfg
-        self._base = cfg.lexicon_base_url.rstrip("/")
+        # LAN primary, tunnel fallback: try each until one logs in, then lock on
+        # to the one that worked for the rest of the session.
+        self._bases = [b.rstrip("/") for b in
+                       (cfg.lexicon_base_url, cfg.lexicon_fallback_url) if b] \
+            or ["http://localhost:36568"]
+        self._base = self._bases[0]
         self._audio_device = audio_device  # mpv --audio-device (e.g. the 3.5mm jack)
         self._cookie: str | None = None   # JSESSIONID value
         self._user_id: int | None = None
@@ -74,31 +79,40 @@ class MediaPlayer:
             return
         if not self._cfg.lexicon_username:
             raise MediaError("No Lexicon credentials configured for media playback.")
-        try:
-            resp = httpx.post(
-                f"{self._base}/api/auth/login",
-                json={
-                    "username": self._cfg.lexicon_username,
-                    "password": self._cfg.lexicon_password,
-                },
-                timeout=10.0,
-            )
-        except httpx.HTTPError as exc:
-            raise MediaError(f"Could not reach Lexicon: {exc}") from exc
-        if resp.status_code != 200:
-            raise MediaError(f"Lexicon login failed ({resp.status_code}).")
-        try:
-            data = resp.json()
-        except ValueError:
-            data = {}
-        if not data.get("success"):
-            raise MediaError("Lexicon login rejected (bad credentials?).")
-        self._user_id = data.get("id") or data.get("playerId")
-        jsid = resp.cookies.get("JSESSIONID") or _jsessionid_from_headers(resp)
-        if not jsid:
-            raise MediaError("Lexicon did not return a session cookie.")
-        self._cookie = jsid
-        logger.info("Lexicon media login ok (user_id=%s)", self._user_id)
+        last: Exception | None = None
+        for base in self._bases:  # LAN first, then the tunnel fallback
+            try:
+                resp = httpx.post(
+                    f"{base}/api/auth/login",
+                    json={
+                        "username": self._cfg.lexicon_username,
+                        "password": self._cfg.lexicon_password,
+                    },
+                    timeout=10.0,
+                )
+            except httpx.HTTPError as exc:
+                last = exc
+                logger.info("Lexicon unreachable at %s (%s); trying next", base, exc)
+                continue
+            if resp.status_code != 200:
+                last = MediaError(f"Lexicon login failed ({resp.status_code}) at {base}")
+                logger.info("%s", last)
+                continue
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {}
+            if not data.get("success"):
+                raise MediaError("Lexicon login rejected (bad credentials?).")
+            jsid = resp.cookies.get("JSESSIONID") or _jsessionid_from_headers(resp)
+            if not jsid:
+                raise MediaError("Lexicon did not return a session cookie.")
+            self._user_id = data.get("id") or data.get("playerId")
+            self._cookie = jsid
+            self._base = base  # lock onto the base that worked for this session
+            logger.info("Lexicon media login ok at %s (user_id=%s)", base, self._user_id)
+            return
+        raise MediaError(f"Could not reach Lexicon at {self._bases}: {last}")
 
     def _headers(self) -> dict[str, str]:
         return {"Cookie": f"JSESSIONID={self._cookie}"}
