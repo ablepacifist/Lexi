@@ -51,25 +51,28 @@ class _State:
         self.pipeline = VoicePipeline(
             self.cfg, self.client, self.identity, engines=self.engines
         )
-        self.token = _tool_token(self.cfg)
+        self.token = self.cfg.tool_token()
 
 
-def _tool_token(cfg: LexiConfig) -> str:
-    """The shared secret callers must present.
+class _SttState:
+    """State for the STT-only service (aragon): just the transcriber + token.
+    Deliberately builds no tts/wake/vad/brain/identity, so the offload host needs
+    only faster-whisper (numpy path → no PyAV)."""
 
-    Reuses the brain token's env-then-file discipline rather than inventing a
-    second mechanism, but under its own name so the two can be rotated apart.
-    """
-    import os
-    from pathlib import Path
+    def __init__(self) -> None:
+        from .engines.stt import WhisperStt
 
-    env = os.getenv("LEXI_TOOL_TOKEN", "").strip()
-    if env:
-        return env
-    try:
-        return Path("./.tool_token").read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+        self.cfg: LexiConfig = load_config()
+        self.stt = WhisperStt(self.cfg.engines)
+        self.token = self.cfg.tool_token()
+
+
+def _require_token(token: str, authorization: str) -> None:
+    """Shared bearer check. Fails closed: an unset token is 503, not open."""
+    if not token:
+        raise HTTPException(503, "Lexi tool token is not configured")
+    if authorization.removeprefix("Bearer ").strip() != token:
+        raise HTTPException(401, "bad or missing tool token")
 
 
 def pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
@@ -92,12 +95,7 @@ def create_app(state: _State | None = None) -> FastAPI:
     app.add_middleware(CORSMiddleware, allow_origins=[], allow_methods=["POST"])
 
     def require_token(authorization: str = Header(default="")) -> None:
-        if not st.token:
-            # Fail closed. An unset token must not mean "no auth required".
-            raise HTTPException(503, "Lexi tool token is not configured")
-        presented = authorization.removeprefix("Bearer ").strip()
-        if presented != st.token:
-            raise HTTPException(401, "bad or missing tool token")
+        _require_token(st.token, authorization)
 
     @app.get("/health")
     def health() -> dict:
@@ -176,18 +174,57 @@ def create_app(state: _State | None = None) -> FastAPI:
     return app
 
 
+def create_stt_app(state: _SttState | None = None) -> FastAPI:
+    """STT-only service for an offload host (aragon): POST raw PCM, get a
+    transcript. No brain/tts/wake — the host needs only faster-whisper."""
+    st = state or _SttState()
+    app = FastAPI(title="Lexi STT", docs_url=None, redoc_url=None)
+    app.add_middleware(CORSMiddleware, allow_origins=[], allow_methods=["POST"])
+
+    def require_token(authorization: str = Header(default="")) -> None:
+        _require_token(st.token, authorization)
+
+    @app.get("/health")
+    def health() -> dict:
+        return {"ok": True}
+
+    @app.post("/stt", dependencies=[Depends(require_token)])
+    async def stt(request: Request, sample_rate: int = 16000) -> dict:
+        """Transcribe raw int16 mono PCM. Raw PCM (not an encoded clip) keeps the
+        host on faster-whisper's numpy path — no PyAV needed."""
+        pcm = await request.body()
+        if not pcm:
+            raise HTTPException(400, "empty audio upload")
+        if len(pcm) > MAX_CLIP_BYTES:
+            raise HTTPException(413, f"clip larger than {MAX_CLIP_BYTES} bytes")
+        t0 = time.perf_counter()
+        try:
+            transcript = st.stt.transcribe(pcm, sample_rate)
+        except Exception as exc:
+            logger.warning("transcribe failed: %s", exc)
+            raise HTTPException(500, f"could not transcribe: {exc}") from exc
+        return {"transcript": transcript,
+                "timings": {"stt": round(time.perf_counter() - t0, 3)}}
+
+    return app
+
+
 def main() -> int:  # pragma: no cover - process entry
     import argparse
 
     import uvicorn
 
     ap = argparse.ArgumentParser(prog="lexi-server")
-    ap.add_argument("--host", default="127.0.0.1", help="bind address (keep local)")
+    ap.add_argument("--stt", action="store_true",
+                    help="run the STT-only offload service (for hosts like aragon)")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="bind address (use 0.0.0.0 for --stt so the Pi can reach it)")
     ap.add_argument("--port", type=int, default=8765)
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    uvicorn.run(create_app(), host=args.host, port=args.port)
+    app = create_stt_app() if args.stt else create_app()
+    uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
 

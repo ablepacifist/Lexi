@@ -63,6 +63,11 @@ class EngineConfig:
     stt_device: str = "cpu"          # cpu | cuda
     stt_compute_type: str = "int8"
     stt_language: str | None = None  # None = autodetect
+    # Offload STT to a remote lexi-stt service (e.g. aragon: "http://192.168.1.4:8765").
+    # Empty = transcribe locally with faster-whisper (default). When set, the Pi POSTs
+    # the utterance there; stt_model above is then the LOCAL FALLBACK model.
+    stt_remote_url: str = ""
+    stt_remote_fallback_local: bool = True  # on remote failure, transcribe locally
     tts_voice: str = "en_US-lessac-medium"   # Piper voice name / .onnx path
     wake_enabled: bool = True
     wake_model: str = "hey_jarvis"   # openWakeWord model name / path
@@ -99,15 +104,29 @@ class LexiConfig:
     # Where the gateway shared-secret comes from (env wins over file).
     agent_token_env: str = "OBRENNA_AGENT_TOKEN"
     agent_token_file: str = "./.agent_token"
+    # The Lexi tool token guards the lexi-stt / lexi-server HTTP hops (Pi ↔ aragon).
+    # Same env-then-file discipline as the brain token, under its own name so the
+    # two rotate apart.
+    tool_token_env: str = "LEXI_TOOL_TOKEN"
+    tool_token_file: str = "./.tool_token"
 
     def agent_token(self) -> str:
-        env = os.getenv(self.agent_token_env, "").strip()
-        if env:
-            return env
-        try:
-            return Path(self.agent_token_file).read_text(encoding="utf-8").strip()
-        except OSError:
-            return ""
+        return read_token(self.agent_token_env, self.agent_token_file)
+
+    def tool_token(self) -> str:
+        return read_token(self.tool_token_env, self.tool_token_file)
+
+
+def read_token(env_name: str, file_path: str) -> str:
+    """A shared secret
+    Used for both the brain agent token and the lexi tool token."""
+    env = os.getenv(env_name, "").strip()
+    if env:
+        return env
+    try:
+        return Path(file_path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def _config_path() -> Path | None:
@@ -140,7 +159,9 @@ def load_config(path: str | os.PathLike | None = None) -> LexiConfig:
         engines=EngineConfig(**_section(data, "engines")),
         history=HistoryConfig(**_section(data, "history")),
     )
-    top = {k: v for k, v in data.items() if k in ("agent_token_env", "agent_token_file")}
+    top = {k: v for k, v in data.items()
+           if k in ("agent_token_env", "agent_token_file",
+                    "tool_token_env", "tool_token_file")}
     for k, v in top.items():
         setattr(cfg, k, v)
     return cfg
