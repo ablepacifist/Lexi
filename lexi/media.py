@@ -25,7 +25,6 @@ import socket
 import subprocess
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -52,12 +51,18 @@ class MediaPlayer:
         self._proc: subprocess.Popen | None = None
         self._ipc_path = str(Path(_IPC_SOCKET).resolve())
         self._paused = False
-        # Live stream: a background thread follows the communal stream's SSE feed
-        # and re-points mpv when the shared track changes.
+        # Live stream: the communal MUSIC stream is SYNCHRONIZED — every client
+        # follows the server. A background thread reads the SSE update feed and
+        # switches the Pi's mpv whenever the shared track changes (e.g. someone
+        # skips on their phone). A second thread reports our track's natural end so
+        # the stream keeps advancing when the Pi is the only listener.
         self._livestream_active = False
         self._ls_current_media: int | None = None
+        self._ls_channel = "music"  # Lexi's "live stream" is the MUSIC channel
         self._ls_stop = threading.Event()
-        self._ls_thread: threading.Thread | None = None
+        self._ls_lock = threading.Lock()       # serializes track switches
+        self._ls_ended_reported: int | None = None
+        self._ls_threads: list[threading.Thread] = []
 
     @property
     def enabled(self) -> bool:
@@ -137,7 +142,7 @@ class MediaPlayer:
             raise MediaError("mpv is not installed on this device.")
         if not urls:
             raise MediaError("nothing to play")
-        self.stop()
+        self._kill_mpv()  # only the process — the live-stream driver spawns via this too
         try:
             Path(self._ipc_path).unlink()  # stale socket from a killed mpv
         except OSError:
@@ -160,11 +165,12 @@ class MediaPlayer:
 
     def play(self, media_id: int) -> None:
         # A one-item playlist so "next" degrades gracefully (no-op) instead of erroring.
+        self._stop_livestream_driver()  # switching to a track ends any live stream
         self._spawn([self._url(media_id)])
         logger.info("mpv playing media_id=%s", media_id)
 
-    def stop(self) -> None:
-        self._stop_livestream_follower()
+    def _kill_mpv(self) -> None:
+        """Terminate the mpv process only (leaves live-stream state alone)."""
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()
             try:
@@ -173,6 +179,10 @@ class MediaPlayer:
                 self._proc.kill()
         self._proc = None
         self._paused = False
+
+    def stop(self) -> None:
+        self._stop_livestream_driver()
+        self._kill_mpv()
 
     @property
     def is_playing(self) -> bool:
@@ -184,7 +194,9 @@ class MediaPlayer:
 
     @property
     def livestream_active(self) -> bool:
-        return self._livestream_active and self.is_playing
+        # True for the whole session (incl. the brief gap between tracks), so a
+        # spoken "skip" always routes to the live-stream vote, not a local skip.
+        return self._livestream_active
 
     # ── live control over mpv's JSON IPC socket (pause / resume / skip) ──────
     def _ipc(self, command: list) -> None:
@@ -318,101 +330,139 @@ class MediaPlayer:
         randomizes; "next" skips within it via IPC)."""
         if not media_ids:
             raise MediaError("nothing to play")
+        self._stop_livestream_driver()  # switching to a playlist ends any live stream
         self._spawn([self._url(m) for m in media_ids], shuffle=shuffle)
         logger.info("mpv playing %d tracks (shuffle=%s)", len(media_ids), shuffle)
 
     # ── live stream (synchronized communal stream) ───────────────────────────
-    def livestream_state(self) -> dict:
-        data = self._authed_json("/api/livestream/state") or {}
+    # Lexicon runs TWO parallel channels: "video" (the default) and "music".
+    # Lexi's spoken "live stream" is the MUSIC channel, so every call passes it.
+    def livestream_state(self, channel: str = "music") -> dict:
+        data = self._authed_json("/api/livestream/state", {"channel": channel}) or {}
         return data.get("state") or {}
 
-    def play_livestream(self) -> None:
-        """Join Lexicon's communal stream at its live position and follow it."""
-        st = self.livestream_state()
+    def play_livestream(self, channel: str = "music") -> None:
+        """Join Lexicon's SYNCHRONIZED communal MUSIC stream and follow it.
+
+        The stream is shared: whoever skips/queues (this Pi, a phone, the web app)
+        changes the server's current track, and every client follows. So the Pi is
+        a follower — a background thread reads the SSE update feed and switches our
+        mpv whenever the shared track changes. We play each track from the START
+        (never a wall-clock seek: the server's position is often stale and seeking
+        past the end plays silence). A second thread reports our track's natural
+        end so the stream still advances when the Pi is the only listener."""
+        self._stop_livestream_driver()
+        self._ls_channel = channel
+        st = self.livestream_state(channel)
         mid = st.get("currentMediaId")
         if not mid:
             raise MediaError("The live stream has nothing playing right now.")
-        self._spawn([self._url(int(mid))], start=self._livestream_offset(st))
+        self._ls_stop = threading.Event()
         self._ls_current_media = int(mid)
+        self._ls_ended_reported = None
         self._livestream_active = True
-        self._start_livestream_follower()
-        logger.info("joined live stream at media_id=%s", mid)
+        self._spawn([self._url(int(mid))])  # from the start — no unsafe seek
+        self._ls_threads = [
+            threading.Thread(target=self._follow_livestream, name="lexi-ls-follow", daemon=True),
+            threading.Thread(target=self._watch_livestream_end, name="lexi-ls-end", daemon=True),
+        ]
+        for t in self._ls_threads:
+            t.start()
+        logger.info("joined %s live stream at media_id=%s", channel, mid)
 
     def livestream_skip(self) -> None:
-        """Cast a vote to skip the current communal track. The SSE feed then
-        tells us to switch when the stream actually advances."""
-        self._ensure_login()
+        """Vote to skip on the shared stream. The server advances the current track
+        and the SSE follower switches every client (this Pi included) to the next."""
         try:
-            resp = httpx.post(
-                f"{self._base}/api/livestream/skip",
-                json={"userId": self._user_id},
-                headers=self._headers(), timeout=10.0,
-            )
-            resp.raise_for_status()
+            self._post_livestream("skip", {"userId": self._user_id})
         except httpx.HTTPError as exc:
             raise MediaError(f"Skip vote failed: {exc}") from exc
 
-    @staticmethod
-    def _livestream_offset(st: dict) -> float:
-        """Seconds into the current track the communal stream is right now:
-        its recorded position plus wall-clock elapsed since it started."""
-        pos = (st.get("currentPositionMs") or 0) / 1000.0
-        started = st.get("currentStartTime")
-        if not started:
-            return max(0.0, pos)
-        try:
-            t = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
-        except ValueError:
-            return max(0.0, pos)
-        # aware timestamp → compare in its zone; naive → assume same locale as the
-        # Pi (both on-site), which is the common case for this homelab.
-        now = datetime.now(t.tzinfo) if t.tzinfo else datetime.now()
-        elapsed = (now - t).total_seconds()
-        if elapsed < 0 or elapsed > 6 * 3600:  # clock skew / unparseable → ignore
-            elapsed = 0.0
-        return max(0.0, pos + elapsed)
-
-    def _start_livestream_follower(self) -> None:
-        self._stop_livestream_follower()
-        self._ls_stop = threading.Event()
-        self._ls_thread = threading.Thread(
-            target=self._follow_livestream, name="lexi-livestream", daemon=True
-        )
-        self._ls_thread.start()
-
-    def _stop_livestream_follower(self) -> None:
+    def _stop_livestream_driver(self) -> None:
         self._livestream_active = False
-        self._ls_stop.set()
-        self._ls_thread = None
+        self._ls_stop.set()          # tell the follower/end threads to exit
+        self._ls_threads = []
         self._ls_current_media = None
 
-    def _follow_livestream(self) -> None:  # pragma: no cover - network thread
-        url = f"{self._base}/api/livestream/updates"
-        event: str | None = None
-        try:
-            with httpx.stream("GET", url, headers=self._headers(), timeout=None) as resp:
-                for line in resp.iter_lines():
-                    if self._ls_stop.is_set():
-                        return
-                    if line.startswith("event:"):
-                        event = line.split(":", 1)[1].strip()
-                    elif line.startswith("data:") and event in ("init", "state-update"):
-                        self._on_livestream_state(line.split(":", 1)[1].strip())
-        except Exception as exc:  # network drop, shutdown, etc.
-            logger.debug("live stream follower ended: %s", exc)
+    def _switch_to(self, mid: int) -> None:
+        """Point mpv at a newly-current shared track (from the start). Serialized so
+        the SSE follower and the end-watcher can't spawn two mpv at once."""
+        with self._ls_lock:
+            if self._ls_stop.is_set() or mid == self._ls_current_media:
+                return
+            self._ls_current_media = mid
+            self._ls_ended_reported = None
+            try:
+                self._spawn([self._url(mid)])
+            except MediaError as exc:
+                logger.warning("live stream switch failed: %s", exc)
+                return
+        logger.info("live stream switched to media_id=%s", mid)
 
-    def _on_livestream_state(self, data: str) -> None:  # pragma: no cover - network thread
+    def _follow_livestream(self) -> None:  # pragma: no cover - network thread
+        """Read the shared stream's SSE feed and switch tracks when it changes.
+        Reconnects until stopped (the server closes the stream every ~30 min)."""
+        url = f"{self._base}/api/livestream/updates"
+        params = {"channel": self._ls_channel}
+        while not self._ls_stop.is_set():
+            event: str | None = None
+            try:
+                with httpx.stream("GET", url, params=params,
+                                  headers=self._headers(), timeout=None) as resp:
+                    for line in resp.iter_lines():
+                        if self._ls_stop.is_set():
+                            return
+                        if line.startswith("event:"):
+                            event = line.split(":", 1)[1].strip()
+                        elif line.startswith("data:") and event in ("init", "state-update"):
+                            self._on_livestream_update(line.split(":", 1)[1].strip())
+            except Exception as exc:  # network drop / timeout → reconnect
+                logger.debug("live stream feed dropped (%s); reconnecting", exc)
+            if not self._ls_stop.wait(1.0):
+                continue
+
+    def _on_livestream_update(self, data: str) -> None:  # pragma: no cover - network thread
         try:
             payload = json.loads(data)
         except ValueError:
             return
         st = payload.get("state") or payload.get("data") or payload
         mid = st.get("currentMediaId") if isinstance(st, dict) else None
-        if not mid or int(mid) == self._ls_current_media:
-            return
-        self._ls_current_media = int(mid)
-        logger.info("live stream advanced to media_id=%s", mid)
-        self._ipc(["loadfile", self._url(int(mid)), "replace"])
+        if mid:
+            self._switch_to(int(mid))
+
+    def _watch_livestream_end(self) -> None:  # pragma: no cover - network thread
+        """When our track finishes locally, report it so the shared stream advances
+        (keeps music going when the Pi is the only listener). A track the follower
+        already switched away from never reaches natural EOF here, so this won't
+        fight a phone-driven skip."""
+        while not self._ls_stop.wait(0.5):
+            if not self._livestream_active:
+                continue
+            proc = self._proc
+            if proc is None or proc.poll() is None:
+                continue  # still playing (a paused track also reports poll()==None)
+            with self._ls_lock:
+                if self._ls_stop.is_set() or proc is not self._proc:
+                    continue  # a switch already happened
+                cur = self._ls_current_media
+                if cur is None or cur == self._ls_ended_reported:
+                    continue  # already reported this track's end
+                self._ls_ended_reported = cur
+            try:
+                self._post_livestream("media-ended")  # server advances → SSE → switch
+            except Exception as exc:
+                logger.debug("media-ended report failed: %s", exc)
+
+    def _post_livestream(self, action: str, body: dict | None = None) -> None:
+        self._ensure_login()
+        resp = httpx.post(
+            f"{self._base}/api/livestream/{action}",
+            params={"channel": self._ls_channel},
+            json=body,
+            headers=self._headers(), timeout=10.0,
+        )
+        resp.raise_for_status()
 
 
 def _jsessionid_from_headers(resp: httpx.Response) -> str | None:
