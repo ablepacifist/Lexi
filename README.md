@@ -64,8 +64,19 @@ tflite-runtime is needed at runtime.
 ## Configure
 
 ```bash
-cp config.example.toml config.toml   # edit alison's LAN IP, models, etc.
+cp config.example.toml config.toml   # edit engine settings (models, wake word, etc.)
+cp .env.example .env                 # optional: edit destinations for a standalone run
 ```
+
+**Destinations** (bind host/port, Obrenna's brain URLs, the Lexicon URL, the
+tool token) come from the monorepo's one destination registry, not from
+`config.toml`: `.env.example` documents the keys (`LEXI_HOST`, `LEXI_PORT`,
+`LEXICON_PORT`, `ALISON_LAN_IP`, `BRAIN_LAN_PORT`, `PUBLIC_BRAIN_URL`,
+`PUBLIC_LEXICON_URL`, `LEXI_TOOL_TOKEN`, `LEXI_STT_REMOTE_URL`), with safe
+standalone defaults so a lone Lexi checkout runs on its own. Layering (lowest
+to highest): dataclass defaults/`config.toml` < Lexi's own `.env` < the
+monorepo root `.env` < real process environment. See `.env.example` for
+details and `lexi/config.py`'s module docstring for how it is loaded.
 
 The Obrenna gateway shared secret is **not** in the config. Provide it via env or
 file (same token the gateway expects in `OBRENNA_AGENT_TOKEN`):

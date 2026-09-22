@@ -26,7 +26,7 @@ import wave
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import LexiConfig, load_config
+from .config import LexiConfig, bind_defaults, load_config
 from .engines.registry import Engines, build_engines
 from .identity import IdentityResolver
 from .obrenna_client import BrainAuthError, BrainUnreachable, ObrennaClient
@@ -214,12 +214,14 @@ def main() -> int:  # pragma: no cover - process entry
 
     import uvicorn
 
+    default_host, default_port = bind_defaults()  # layered LEXI_HOST/LEXI_PORT; 127.0.0.1:8765 standalone
+
     ap = argparse.ArgumentParser(prog="lexi-server")
     ap.add_argument("--stt", action="store_true",
                     help="run the STT-only offload service (for hosts like aragon)")
-    ap.add_argument("--host", default="127.0.0.1",
+    ap.add_argument("--host", default=default_host,
                     help="bind address (use 0.0.0.0 for --stt so the Pi can reach it)")
-    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--port", type=int, default=default_port)
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

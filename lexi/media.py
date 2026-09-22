@@ -45,10 +45,12 @@ class MediaPlayer:
     def __init__(self, cfg: IdentityConfig, audio_device: str = ""):
         self._cfg = cfg
         # LAN primary, tunnel fallback: try each until one logs in, then lock on
-        # to the one that worked for the rest of the session.
+        # to the one that worked for the rest of the session. The "or" fallback
+        # reuses IdentityConfig's own default rather than a third hardcoded
+        # literal — it only fires if the caller explicitly blanked both fields.
         self._bases = [b.rstrip("/") for b in
                        (cfg.lexicon_base_url, cfg.lexicon_fallback_url) if b] \
-            or ["http://localhost:36568"]
+            or [IdentityConfig().lexicon_base_url]
         self._base = self._bases[0]
         self._audio_device = audio_device  # mpv --audio-device (e.g. the 3.5mm jack)
         self._cookie: str | None = None   # JSESSIONID value

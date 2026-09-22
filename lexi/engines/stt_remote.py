@@ -23,7 +23,9 @@ class RemoteStt:
     def __init__(self, cfg: EngineConfig):
         self._cfg = cfg
         self._url = cfg.stt_remote_url.rstrip("/")
-        self._token = config.read_token("LEXI_TOOL_TOKEN", "./.tool_token")
+        # Layered (real env > master .env > Lexi's own .env), falling back to
+        # ./.tool_token — not a bare os.getenv, so a root-.env-only override works.
+        self._token = config.tool_token()
         self._local = None            # lazy local WhisperStt (fallback)
         self._in_fallback = False     # so we log the transition once, not per turn
 
