@@ -267,13 +267,80 @@ git commit -m "Add Lexi voice-edge submodule"
 To clone the whole stack later: `git clone --recurse-submodules …`, or
 `git submodule update --init --recursive` in an existing checkout.
 
-## Known documentation gap: voice control of Tapo smart lights
+## Lights: voice control of the Tapo bulbs
 
-A full `lexi/lights/` feature (voice control of Tapo bulbs — on/off,
-brightness, color — via an MQTT bridge on a home-automation hub, with direct
-Pi-to-bulb control as an automatic fallback when the hub is off) was built,
-tested (300+ tests), and is **currently deployed and running** on the Pi and
-the hub — but it was **never committed to this branch**. `git log` and this
-README can't describe it because, as far as the repository is concerned, it
-doesn't exist yet. If you want it documented here for real, it needs to be
-committed first — ask for it to be prepared for that.
+"Turn on the lamp", "make the bedroom light blue", "set both lights to 30 percent",
+"dimmer", "make it red" — handled **locally** (`lexi/lights/`), matched *before*
+media so `put on the lamp` is never taken for a song, and working with the brain
+off.
+
+```
+Pi: wake → STT → light grammar ──► MQTT bridge (a home-automation hub) ──► bulbs   (preferred)
+                              └──► direct from the Pi ──► bulbs                     (fallback if the hub is off)
+```
+
+**Set up (each machine that touches the bulbs — the voice device, and the hub for
+the bridge):**
+
+```bash
+pip install '.[lights]'                    # python-kasa + paho-mqtt (pinned)
+cp lights.example.toml lights.toml         # then edit: your names + each bulb's MAC
+```
+Put the secrets in `.env` (git-ignored; keys are in `.env.example`): `TAPO_USERNAME`/
+`TAPO_PASSWORD` (the TP-Link account the bulbs were set up under — used **locally** to
+derive the bulbs' auth key, no cloud calls) and, to prefer a bridge, `MQTT_HOST` (+
+`MQTT_USERNAME`/`MQTT_PASSWORD`). No `MQTT_HOST` = direct control only.
+
+```bash
+python -m lexi.lights discover             # find the bulbs; prints MACs + a lights.toml snippet
+python -m lexi.lights identify lamp        # blink one so you can see which bulb it is
+python -m lexi.lights say "make the lamp blue"   # the voice grammar, without the voice
+python -m lexi.lights say --direct "turn off the lights"   # skip the bridge
+python -m lexi.lights state                # what the bulbs report
+python -m lexi.lights bridge               # run the bridge (the hub's service)
+```
+
+Bulbs are found by **MAC**, not IP — the router hands out IPs and they change, so no
+DHCP reservation is needed. To turn a MAC into an address, `TapoBackend` tries, in
+order: the last-known address (saved to `logs/light_hosts.json`, connected to
+directly), **ARP** (`/proc/net/arp` — the network layer's own MAC→IP table, reliable),
+and only then UDP broadcast discovery, retried once — broadcast replies are
+frequently lost on Wi-Fi, so it's last on purpose. If a bulb moves, the saved
+address heals itself on the next command.
+
+**Newer bulb firmware:** some Tapo bulbs ship firmware using TP-Link's newer `TPAP`
+protocol, which `python-kasa` doesn't support yet. `discover` prints these as
+`UNSUPPORTED`. The fix that has worked in practice: remove the bulb from the Tapo
+app and re-add it from scratch (a full re-pair) — this has reliably brought a bulb
+back onto the older, supported protocol even when the "Third-Party Compatibility"
+toggle (Me → Third-Party Services, in the Tapo app) did not. Don't block the
+bulbs' internet access either way: on some firmware that makes them reboot-loop.
+
+**The hub's broker:** Mosquitto needs a LAN listener with authentication (its
+default listener is localhost-only) — add `/etc/mosquitto/conf.d/lexi.conf`:
+
+```
+listener 1883
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+acl_file /etc/mosquitto/acl
+```
+```
+# /etc/mosquitto/acl — the voice device may command lights and read their state;
+# only the bridge may write acks, state and its own status.
+user lexi
+topic write home/lights/+/set
+topic read  home/lights/#
+
+user lights-bridge
+topic read  home/lights/+/set
+topic write home/lights/+/ack
+topic write home/lights/+/state
+topic write home/lights/bridge/status
+```
+
+MQTT topics: `home/lights/<id>/set` (command), `.../ack`, retained `.../state`, and
+a retained `home/lights/bridge/status` (`online`/`offline`, via MQTT Last Will) —
+this is how the voice device knows instantly whether to skip the bridge, so a
+powered-off hub costs zero extra latency on top of a normal command. Node-RED (or
+anything else) can publish/subscribe the same topics for schedules and scenes.

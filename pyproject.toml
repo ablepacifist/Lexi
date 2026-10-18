@@ -31,6 +31,15 @@ server = [
     "fastapi==0.141.1",
     "uvicorn==0.52.4",
 ]
+# Voice control of the Tapo bulbs (lexi/lights/). Needed on the Pi (direct
+# fallback + MQTT client) and on Bilbo (the bridge). Pinned: python-kasa's device
+# API changed a lot across 0.6-0.10 (Module.Light, Device.connect(config=...)), and
+# paho-mqtt 2.x changed its callback signatures, so a floating upgrade breaks at
+# runtime rather than at install.
+lights = [
+    "python-kasa==0.10.2",
+    "paho-mqtt==2.1.0",
+]
 dev = ["pytest>=8"]
 
 [project.scripts]

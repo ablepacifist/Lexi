@@ -138,11 +138,43 @@ class HistoryConfig:
 
 
 @dataclass
+class LightsConfig:
+    """Voice control of the Tapo bulbs (``lexi/lights/``).
+
+    The bulb inventory (names, MACs, groups) lives in ``file`` (``lights.toml``,
+    git-ignored). Destinations and secrets come from the layered env — never from a
+    committed file: ``MQTT_HOST``/``MQTT_PORT`` locate Bilbo's broker,
+    ``MQTT_USERNAME``/``MQTT_PASSWORD`` authenticate to it, and
+    ``TAPO_USERNAME``/``TAPO_PASSWORD`` are the TP-Link account used locally to
+    derive the bulbs' auth key (no cloud calls). With no ``mqtt_host`` the Pi
+    controls the bulbs directly; with one, Bilbo's bridge is preferred and direct
+    control is the fallback.
+    """
+    enabled: bool = True
+    file: str = "./lights.toml"
+    mqtt_host: str = ""
+    mqtt_port: int = 1883
+    mqtt_username: str = ""
+    mqtt_password: str = ""
+    tapo_username: str = ""
+    tapo_password: str = ""
+    # Last-known IP of each bulb (by MAC), so a fresh process connects directly instead
+    # of depending on a Wi-Fi broadcast whose replies can be lost. Lives under logs/
+    # (git-ignored). Blank = don't persist.
+    host_cache: str = "./logs/light_hosts.json"
+    ack_timeout_s: float = 4.0      # how long to wait for the bridge before falling back
+    direct_fallback: bool = True    # False = bridge only (no Tapo credentials needed here)
+    brightness_step: int = 25       # what "dimmer"/"brighter" moves by (percent)
+    recent_s: float = 120.0         # how long "it"/"brighter" keeps meaning the last lights
+
+
+@dataclass
 class LexiConfig:
     brain: BrainConfig = field(default_factory=BrainConfig)
     identity: IdentityConfig = field(default_factory=IdentityConfig)
     engines: EngineConfig = field(default_factory=EngineConfig)
     history: HistoryConfig = field(default_factory=HistoryConfig)
+    lights: LightsConfig = field(default_factory=LightsConfig)
     # Where the gateway shared-secret comes from (env wins over file).
     agent_token_env: str = "OBRENNA_AGENT_TOKEN"
     agent_token_file: str = "./.agent_token"
@@ -323,6 +355,7 @@ def load_config(path: str | os.PathLike | None = None) -> LexiConfig:
         identity=IdentityConfig(**_section(data, "identity")),
         engines=EngineConfig(**_section(data, "engines")),
         history=HistoryConfig(**_section(data, "history")),
+        lights=LightsConfig(**_section(data, "lights")),
     )
     top = {k: v for k, v in data.items()
            if k in ("agent_token_env", "agent_token_file",
@@ -352,5 +385,23 @@ def load_config(path: str | os.PathLike | None = None) -> LexiConfig:
     stt_remote = env_value(env, "LEXI_STT_REMOTE_URL")
     if stt_remote:
         cfg.engines.stt_remote_url = stt_remote
+
+    # Lights: the broker location and both credential pairs are registry values
+    # (secrets live in .env / the process env, never in a committed file).
+    lights_file = env_value(env, "LEXI_LIGHTS_FILE")
+    if lights_file:
+        cfg.lights.file = lights_file
+    for key, attr in (("MQTT_HOST", "mqtt_host"), ("MQTT_USERNAME", "mqtt_username"),
+                      ("MQTT_PASSWORD", "mqtt_password"), ("TAPO_USERNAME", "tapo_username"),
+                      ("TAPO_PASSWORD", "tapo_password")):
+        val = env_value(env, key)
+        if val:
+            setattr(cfg.lights, attr, val)
+    mqtt_port = env_value(env, "MQTT_PORT")
+    if mqtt_port:
+        try:
+            cfg.lights.mqtt_port = int(mqtt_port)
+        except ValueError:
+            pass  # a bad port leaves the default rather than crashing startup
 
     return cfg
