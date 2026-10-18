@@ -1,29 +1,39 @@
 # Lexi — Obrenna's voice edge
 
 Lexi is the **ears and mouth** for [Obrenna](https://llm.alex-dyakin.com). It runs
-on **aragon** (alongside Lexicon/Alchemy) and holds the mic/speaker plus all the
+on the voice-edge device — a **Raspberry Pi** (mic + speaker) — and holds all the
 voice engines and logic. Obrenna's **brain** (the LLM) stays on **alison**.
+**aragon** hosts Lexicon/Alchemy and can optionally run a lightweight STT-offload
+service for Lexi (see below) — it does not run the voice loop itself.
 
 **Only text crosses the network.** Lexi does mic → wake word → VAD → Whisper (STT)
-locally, sends the transcript to Obrenna's existing `POST /api/chat/stream`,
-streams the answer tokens back, sentence-chunks them, and speaks them with Piper
-— all locally. No audio leaves aragon, and **nothing calls a cloud service**:
-every engine is local inference on local model files.
+locally (or offloaded to aragon — still just a transcript over the LAN), sends
+the transcript to Obrenna's existing `POST /api/chat/stream`, streams the answer
+tokens back, sentence-chunks them, and speaks them with Piper — all locally. No
+audio leaves the Pi, and **nothing calls a cloud service**: every engine is local
+inference on local model files.
 
 ```
-aragon (Lexi):  mic → wake → VAD → STT ─┐
+Pi (Lexi):      mic → wake → VAD → STT ─┐
                                           │  text + account_id  (LAN → tunnel)
    Piper ← sentence-chunk ← tokens (SSE) ◄┼──────────────────────────────────►  alison: Obrenna gateway
                                           │                                        → POST /api/chat/stream
    speaker ◄─────────────────────────────┘                                        → small voice model
+
+                 (optional) STT offload: Pi --[PCM over LAN]--> aragon: lexi.server --stt
 ```
 
 ## Layers
 
-- **engines/** — `stt` (faster-whisper), `tts` (Piper), `wake` (openWakeWord),
-  `vad` (webrtcvad). Local, CPU, lazy-loaded.
-- **logic** — `pipeline` (the turn: wake→VAD→STT→identity→brain→chunk→TTS→speak),
-  `session` (state + barge-in cancel token), `audio` (sentence chunker + mic/IO).
+- **engines/** — `stt` (faster-whisper, or `stt_remote` to offload it — see
+  below), `tts` (Piper), `wake` (openWakeWord), `vad` (webrtcvad). Local, CPU,
+  lazy-loaded.
+- **logic** — `pipeline` (the turn: wake→VAD→STT→identity→media/brain→chunk→
+  TTS→speak), `session` (state + barge-in cancel token), `audio` (sentence
+  chunker + mic/IO), `intents` (local device commands — see Music & media).
+- **media** — talks to the Lexicon library directly (play/playlist/live-stream/
+  skip/pause/resume via mpv), so music works even with the brain offline.
+- **history** — a local, TTL'd JSONL transcript of every turn, for debugging.
 - **identity** — resolves the speaking **Lexicon** user → `account_id` the brain
   scopes memory by (per-user memory).
 - **obrenna_client** — talks to the brain: LAN-primary/tunnel-fallback, gateway
@@ -37,7 +47,7 @@ Base (client + logic only — enough to run text mode):
 pip install -e .
 ```
 
-Full engine stack (on the aragon device, with a mic + PortAudio):
+Full engine stack (on the device with the mic + speaker — normally the Pi):
 
 ```bash
 pip install -e ".[engines]"
@@ -93,7 +103,7 @@ export LEXICON_SESSION="<JSESSIONID>"
 
 ## Run
 
-Start with **text mode** — it exercises the whole aragon→alison path (identity +
+Start with **text mode** — it exercises the whole Pi→alison path (identity +
 gateway auth + brain streaming) without a mic:
 
 ```bash
@@ -102,6 +112,81 @@ python -m lexi --say "what time is it" --no-speak
 python -m lexi                   # text in, spoken out (needs engines)
 python -m lexi --voice           # full mic loop: wake → listen → answer → speak
 ```
+
+## Running it continuously (systemd --user service)
+
+In production this runs as a per-user systemd service so it survives logout and
+starts on boot, not as a manually-run foreground command:
+
+```bash
+# ~/.config/systemd/user/lexi-voice.service
+[Unit]
+Description=Lexi voice assistant
+After=network-online.target sound.target
+
+[Service]
+WorkingDirectory=%h/Lexi
+ExecStart=%h/Lexi/.venv/bin/python -m lexi --voice
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now lexi-voice
+loginctl enable-linger "$USER"   # so it keeps running after you log out / on boot
+```
+
+`__main__.py` already guards against two instances fighting over the mic
+(`_claim_single_instance`, via a pidfile) — if an orphaned `--voice` process is
+still holding the device, starting a new one kills it first.
+
+## Music & media (Lexicon library)
+
+Spoken music commands ("play X", "stop", "skip", "shuffle my music", "play the
+live stream") are matched **locally** by `intents.py` before anything reaches
+the brain — so music works even when alison is off. `media.py` talks to
+Lexicon directly and drives playback through **mpv**, controlled live over its
+JSON IPC socket (so skip/pause/resume don't require killing the process).
+
+Lexicon also serves a synchronized **live stream** (`/api/livestream/*`) that
+every listener hears at the same position; `play_livestream` joins it and a
+background thread follows Lexicon's SSE update feed so the Pi switches tracks
+when the communal stream advances.
+
+Whether Lexi can speak over playing music (pause, speak, resume) or has to stop
+it first depends on the device's audio routing — see **Pi audio** below.
+
+## Conversation history
+
+`history.py` keeps a local, TTL'd JSONL log of every voice turn (what Whisper
+heard, and what Lexi did about it) under `logs/turns.jsonl` — useful for
+debugging without a live log tail. It's gitignored and separate from the
+brain's own per-user memory on alison; a logging failure never breaks a turn.
+
+## STT offload (optional): running Whisper on aragon instead of the Pi
+
+The Pi 4's CPU is the pipeline's slowest step. `lexi/server.py` can run as a
+**second, STT-only service** on a stronger box on the LAN (aragon):
+
+```bash
+python -m lexi.server --stt --host 0.0.0.0 --port 8765
+```
+
+This builds *only* a `WhisperStt` — no TTS/wake/VAD/brain client — so the
+offload host needs just `faster-whisper` installed, nothing else from
+`.[engines]`. It accepts raw int16 mono PCM on `POST /stt` (not an encoded
+clip), which keeps it on faster-whisper's numpy decode path — **no PyAV
+needed**, which matters on Windows hosts where PyAV can be a fight to install.
+
+On the Pi, point `LEXI_STT_REMOTE_URL` at it (e.g.
+`http://192.168.1.4:8765`) and set `LEXI_TOOL_TOKEN` to the same value on both
+machines. `engines/stt_remote.py`'s `RemoteStt` then POSTs each utterance there
+and falls back to a local Whisper model automatically if the remote is
+unreachable or errors — aragon is often started by hand, so voice must never
+hard-depend on it being up. `--host 0.0.0.0` is required for the Pi to reach it
+(the default, `127.0.0.1`, is loopback-only).
 
 ## Pi audio: mixing music + speech on one output (PipeWire)
 
@@ -166,7 +251,12 @@ handle /api/chat/stream {
 non-streaming route. Keep `OBRENNA_AGENT_TOKEN` ≥ 32 chars; the verifier fails
 closed.)
 
-## Add Lexi as a submodule of `full-back-end-server` (on aragon)
+## Deployment note
+
+In practice this runs as a **standalone checkout** on the Pi (`~/Lexi`, cloned
+directly from GitHub, deployed via `git fetch && git reset --hard origin/dev`),
+not as a git submodule of `full-back-end-server`. The submodule path below
+still works if you want aragon-side integration instead:
 
 ```bash
 cd /path/to/full-back-end-server
@@ -176,3 +266,14 @@ git commit -m "Add Lexi voice-edge submodule"
 
 To clone the whole stack later: `git clone --recurse-submodules …`, or
 `git submodule update --init --recursive` in an existing checkout.
+
+## Known documentation gap: voice control of Tapo smart lights
+
+A full `lexi/lights/` feature (voice control of Tapo bulbs — on/off,
+brightness, color — via an MQTT bridge on a home-automation hub, with direct
+Pi-to-bulb control as an automatic fallback when the hub is off) was built,
+tested (300+ tests), and is **currently deployed and running** on the Pi and
+the hub — but it was **never committed to this branch**. `git log` and this
+README can't describe it because, as far as the repository is concerned, it
+doesn't exist yet. If you want it documented here for real, it needs to be
+committed first — ask for it to be prepared for that.
