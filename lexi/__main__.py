@@ -48,10 +48,17 @@ def _build(speak: bool, *, need_engines: bool | None = None) -> tuple[VoicePipel
     history = ConversationLog(cfg.history.path, cfg.history.ttl_days, cfg.history.enabled)
 
     engines = None
+    lights = None
     if need_engines if need_engines is not None else speak:
         from .engines.registry import build_engines
         engines = build_engines(cfg.engines)
-    return VoicePipeline(cfg, client, identity, engines=engines, media=media, history=history), cfg
+        # Lights are voice-only (they are matched in run_voice_turn), so a text
+        # one-shot never opens an MQTT connection for them. Returns None — never
+        # raises — when unconfigured, so it cannot stop Lexi starting.
+        from .lights import build_light_router
+        lights = build_light_router(cfg, warm_up=True)  # find the bulbs now, not on the first command
+    return VoicePipeline(cfg, client, identity, engines=engines, media=media,
+                         history=history, lights=lights), cfg
 
 
 def _one(pipeline: VoicePipeline, text: str, speak: bool) -> None:

@@ -3,6 +3,7 @@
 .tool_token
 config.toml
 .env
+lights.toml
 
 # Model files (fetched once at install, never committed)
 models/

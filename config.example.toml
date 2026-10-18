@@ -3,10 +3,11 @@
 # $OBRENNA_AGENT_TOKEN or ./.agent_token (see [agent token] note at bottom).
 
 [brain]
-# Reach Obrenna's gateway on alison. LAN first, tunnel as fallback.
-lan_base_url = "http://alison.lan:9080"          # set to alison's LAN IP:9080
-tunnel_base_url = "https://llm.alex-dyakin.com"
-# Small/fast voice model (catalog slug). Text chat keeps its bigger model.
+# Reach Obrenna's gateway on alison. Tunnel first, LAN as fallback.
+# Destinations (tunnel_base_url, lan_base_url) come from the env registry now
+# — PUBLIC_BRAIN_URL / ALISON_LAN_IP+BRAIN_LAN_PORT in the root .env, or
+# Lexi/.env for a standalone checkout — not from this file. See
+# Lexi/.env.example.
 orchestrator = "qwen3.5-4b-claude-opus-reasoning-distilled-v2"
 workers_enabled = false
 request_timeout_s = 120.0
@@ -14,8 +15,9 @@ connect_timeout_s = 3.0
 
 [identity]
 # Lexicon owns identity. Lexi resolves the speaking user to an account_id the
-# brain scopes memory by. localhost because Lexicon runs on aragon too.
-lexicon_base_url = "http://localhost:36568"
+# brain scopes memory by. lexicon_base_url comes from the env registry now
+# (LEXICON_PORT, composed as http://127.0.0.1:<port>) — not from this file.
+# See Lexi/.env.example.
 default_account_id = "local-default"   # used when no Lexicon session is present
 
 [engines]

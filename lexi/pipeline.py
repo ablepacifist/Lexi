@@ -19,6 +19,7 @@ from .engines.registry import Engines
 from .history import ConversationLog
 from .identity import IdentityResolver
 from .intents import match_media_intent
+from .lights import LightIntent, LightRouter, match_light_intent, summarize
 from .media import MediaError, MediaPlayer
 from .obrenna_client import BrainAuthError, BrainUnreachable, ObrennaClient
 from .session import State, VoiceSession
@@ -36,6 +37,7 @@ class VoicePipeline:
         session: VoiceSession | None = None,
         media: MediaPlayer | None = None,
         history: ConversationLog | None = None,
+        lights: LightRouter | None = None,
     ):
         self._cfg = cfg
         self._client = client
@@ -43,6 +45,7 @@ class VoicePipeline:
         self._engines = engines
         self._media = media
         self._history = history
+        self._lights = lights
         self.session = session or VoiceSession(account_id=identity.account_id())
 
     def _log(self, transcript: str, kind: str, detail: dict) -> None:
@@ -126,6 +129,25 @@ class VoicePipeline:
                 self._media.resume()
             self.session.set_state(State.IDLE)
             return ""
+        # Light commands ("turn on the lamp", "make it blue") are local too, and are
+        # matched BEFORE media because "put on …" is also a media phrase. Lights
+        # don't touch the music, so it resumes afterwards.
+        if self._lights is not None:
+            light_intent = match_light_intent(
+                transcript, self._lights.inventory,
+                has_recent=self._lights.has_recent(),
+                step=self._cfg.lights.brightness_step,
+            )
+            if light_intent is not None:
+                # On an exclusive audio device a paused mpv would mute the spoken
+                # confirmation, so in that case the lights change silently.
+                confirm = speak and (self._cfg.engines.audio_shared or not resume_after)
+                reply, detail = self._handle_light_intent(light_intent, speak=confirm)
+                self._log(transcript, "lights", detail)
+                if resume_after and self._media is not None:
+                    self._media.resume()
+                self.session.set_state(State.IDLE)
+                return reply
         # Media commands ("play …", "stop", "skip", "live stream") are handled
         # locally — no brain — so music works even when alison is offline. A media
         # command manages playback itself, so we never resume the old track after it.
@@ -166,6 +188,37 @@ class VoicePipeline:
         if resume_after and self._media is not None:
             self._media.resume()
         return reply
+
+    def _handle_light_intent(self, intent: LightIntent, *, speak: bool) -> tuple[str, dict]:
+        """Run a light command and say the outcome. Returns (reply, log detail).
+        The bridge-or-direct choice lives in the router; a failure is spoken, never
+        raised, so a dead bulb can't take the voice loop down."""
+        assert self._lights is not None
+        router = self._lights
+        targets = intent.targets or router.last_targets  # "it" → the lights used last
+        if targets is None:
+            reply, detail = "Which light?", {"action": "lights", "result": "no target"}
+        else:
+            self.session.set_state(State.THINKING)
+            result = router.execute(targets.ids, intent.command)
+            router.remember(targets)
+            reply = summarize(router.inventory, intent.command, result)
+            detail = {
+                "action": "lights",
+                "targets": list(targets.ids),
+                "command": intent.command.to_payload(),
+                "via": result.via,
+                "errors": result.errors,
+                "result": reply,
+            }
+            logger.info("lights %s -> %s via=%s errors=%s", list(targets.ids),
+                        intent.command.to_payload(), result.via, result.errors)
+        if speak:
+            try:
+                self.speak_sentence(reply)
+            except Exception as exc:  # noqa: BLE001 - a TTS hiccup must not undo the change
+                logger.debug("light confirmation TTS skipped: %s", exc)
+        return reply, detail
 
     def _handle_media_intent(self, intent: dict, *, speak: bool) -> str:  # pragma: no cover - hardware
         """Play / stop / skip music (single track, playlist, or the communal live

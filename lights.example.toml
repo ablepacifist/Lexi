@@ -1,0 +1,32 @@
+# Lexi lights inventory — copy to `lights.toml` (git-ignored) and edit.
+# Every machine that controls or bridges the bulbs (the Pi, and Bilbo) needs the
+# same file. It holds NO secrets: the Tapo login and MQTT password live in `.env`.
+#
+# Get each bulb's MAC with:   python -m lexi.lights discover
+# See which physical bulb is which with:   python -m lexi.lights identify <id>
+
+# What an unqualified "turn on the light" means: "all", a light id, or a group name.
+default_target = "all"
+
+[[light]]
+# A short stable id, lower-case. It is also part of the MQTT topic
+# (home/lights/<id>/set), so pick it once and leave it.
+id = "lamp"
+# What you can SAY. The FIRST name is also what Lexi says back
+# ("Lamp set to blue"). "the lamp" works too — leading articles are ignored.
+names = ["lamp"]
+# How the bulb is found on the network. Bulbs get their IP from your router
+# (DHCP) and it can change, so the MAC — which never changes — is the identity.
+# No DHCP reservation is needed. Any format works (':' or '-', any case).
+mac = "AA:BB:CC:DD:EE:01"
+# host = "192.168.1.50"   # optional first-guess IP; skips the broadcast when correct
+
+[[light]]
+id = "bedroom"
+names = ["bedroom light", "bedroom"]
+mac = "AA:BB:CC:DD:EE:02"
+
+# Optional named groups: "turn on upstairs". "both"/"all"/"the lights" always mean
+# every light without needing a group.
+# [groups]
+# upstairs = ["lamp", "bedroom"]
