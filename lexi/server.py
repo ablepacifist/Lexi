@@ -18,6 +18,7 @@ streaming satellite protocol to its own phase.
 from __future__ import annotations
 
 import base64
+import hmac
 import io
 import logging
 import time
@@ -68,11 +69,40 @@ class _SttState:
 
 
 def _require_token(token: str, authorization: str) -> None:
-    """Shared bearer check. Fails closed: an unset token is 503, not open."""
+    """Shared bearer check. Fails closed: an unset token is 503, not open.
+
+    The header must be ``Authorization: Bearer <token>`` (a bare token is refused), and the comparison takes the same
+    time whatever prefix of the token was right.
+    """
     if not token:
         raise HTTPException(503, "Lexi tool token is not configured")
-    if authorization.removeprefix("Bearer ").strip() != token:
+    scheme, _, supplied = authorization.partition(" ")
+    if scheme != "Bearer" or not hmac.compare_digest(supplied.strip().encode("utf-8"), token.encode("utf-8")):
         raise HTTPException(401, "bad or missing tool token")
+
+
+async def _read_body_capped(request: Request) -> bytes:
+    """The request body, refusing an oversized one as early as possible.
+
+    A declared Content-Length over the limit is rejected before a byte is read, and a body that turns out larger than it
+    declared (or is chunked with no length) is cut off while reading rather than buffered whole first.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            too_big = int(declared) > MAX_CLIP_BYTES
+        except ValueError:
+            raise HTTPException(400, "bad Content-Length") from None
+        if too_big:
+            raise HTTPException(413, f"clip larger than {MAX_CLIP_BYTES} bytes")
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > MAX_CLIP_BYTES:
+            raise HTTPException(413, f"clip larger than {MAX_CLIP_BYTES} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
@@ -115,7 +145,7 @@ def create_app(state: _State | None = None) -> FastAPI:
         Returns per-stage timings so the caller can see where a slow turn went,
         which is the whole point of being able to run this from a browser.
         """
-        clip = await request.body()
+        clip = await _read_body_capped(request)
         if not clip:
             raise HTTPException(400, "empty audio upload")
         if len(clip) > MAX_CLIP_BYTES:
@@ -192,7 +222,7 @@ def create_stt_app(state: _SttState | None = None) -> FastAPI:
     async def stt(request: Request, sample_rate: int = 16000) -> dict:
         """Transcribe raw int16 mono PCM. Raw PCM (not an encoded clip) keeps the
         host on faster-whisper's numpy path — no PyAV needed."""
-        pcm = await request.body()
+        pcm = await _read_body_capped(request)
         if not pcm:
             raise HTTPException(400, "empty audio upload")
         if len(pcm) > MAX_CLIP_BYTES:

@@ -119,16 +119,26 @@ class MediaPlayer:
     def _headers(self) -> dict[str, str]:
         return {"Cookie": f"JSESSIONID={self._cookie}"}
 
+    def _request(self, method: str, path: str, *, timeout: float, **kwargs) -> httpx.Response:
+        """Call Lexicon with the cached session. Lexicon requires a login and forgets every session when it
+        restarts, so if it answers 401 log in again and retry once instead of failing until Lexi restarts."""
+        resp: httpx.Response | None = None
+        for attempt in (1, 2):
+            self._ensure_login()
+            resp = httpx.request(method, f"{self._base}{path}", headers=self._headers(),
+                                 timeout=timeout, **kwargs)
+            if resp.status_code == 401 and attempt == 1:
+                logger.info("Lexicon session no longer valid; logging in again")
+                self._cookie = None
+                continue
+            break
+        return resp
+
     # ── search ───────────────────────────────────────────────────────────────
     def search(self, query: str) -> list[dict]:
         self._ensure_login()
         try:
-            resp = httpx.get(
-                f"{self._base}/api/media/search",
-                params={"q": query},
-                headers=self._headers(),
-                timeout=10.0,
-            )
+            resp = self._request("GET", "/api/media/search", params={"q": query}, timeout=10.0)
             resp.raise_for_status()
             items = resp.json()
         except httpx.HTTPError as exc:
@@ -262,10 +272,7 @@ class MediaPlayer:
     def _authed_json(self, path: str, params: dict | None = None):
         self._ensure_login()
         try:
-            resp = httpx.get(
-                f"{self._base}{path}", params=params or {},
-                headers=self._headers(), timeout=15.0,
-            )
+            resp = self._request("GET", path, params=params or {}, timeout=15.0)
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPError as exc:
@@ -472,12 +479,8 @@ class MediaPlayer:
 
     def _post_livestream(self, action: str, body: dict | None = None) -> None:
         self._ensure_login()
-        resp = httpx.post(
-            f"{self._base}/api/livestream/{action}",
-            params={"channel": self._ls_channel},
-            json=body,
-            headers=self._headers(), timeout=10.0,
-        )
+        resp = self._request("POST", f"/api/livestream/{action}",
+                             params={"channel": self._ls_channel}, json=body, timeout=10.0)
         resp.raise_for_status()
 
 
